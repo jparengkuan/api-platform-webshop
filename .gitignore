@@ -8,6 +8,10 @@
 *.swp
 *~
 
+# Local assistant instruction files
+/AGENTS.md
+/CLAUDE.md
+
 # Operating system files
 .DS_Store
 Thumbs.db

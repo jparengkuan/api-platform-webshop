@@ -404,8 +404,6 @@ tabellen vóór elke test. Gedeelde fixtures en login-helpers staan in `tests/Ap
 
 ## Werkafspraken
 
-Zie ook [`AGENTS.md`](AGENTS.md).
-
 - **Nieuwe packages** installeer je met `composer require`, zodat de Flex-recipe de configuratie
   aanmaakt. Pas `config/bundles.php` niet met de hand aan.
 - **Metadata via PHP-attributen**, dus `#[ApiResource]`, `#[Assert\…]`, `#[ORM\…]`, `#[Autowire]`.
