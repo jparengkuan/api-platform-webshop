@@ -1,150 +1,150 @@
 # Webshop API
 
-Een REST/JSON-LD API voor een eenvoudige webshop, gebouwd met **Symfony 8.1** en **API Platform 5**.
-Klanten kunnen zich registreren, inloggen met een JWT, de catalogus bekijken en een bestelling
-plaatsen. Beheerders onderhouden de productcatalogus.
+A REST/JSON-LD API for a simple webshop, built with **Symfony 8.1** and **API Platform 5**.
+Customers can register, log in with a JWT, browse the catalog and place an order.
+Administrators maintain the product catalog.
 
-De code volgt de [Symfony best practices](https://symfony.com/doc/current/best_practices.html),
-de SOLID-principes en een aantal gerichte design patterns (zie [Architectuur](#architectuur)).
-
----
-
-## Inhoud
-
-- [Functionaliteit](#functionaliteit)
-- [Techniek](#techniek)
-- [Installatie](#installatie)
-- [De API gebruiken](#de-api-gebruiken)
-- [Architectuur](#architectuur)
-- [Bedrijfsregels](#bedrijfsregels)
-- [Foutafhandeling](#foutafhandeling)
-- [Beveiliging](#beveiliging)
-- [Kwaliteit en tests](#kwaliteit-en-tests)
-- [Projectstructuur](#projectstructuur)
-- [Werkafspraken](#werkafspraken)
-- [Bekende beperkingen en roadmap](#bekende-beperkingen-en-roadmap)
+The code follows the [Symfony best practices](https://symfony.com/doc/current/best_practices.html),
+the SOLID principles and a set of targeted design patterns (see [Architecture](#architecture)).
 
 ---
 
-## Functionaliteit
+## Contents
 
-| Onderdeel   | Wat kan het                                                                                   |
-|-------------|-----------------------------------------------------------------------------------------------|
-| Klanten     | Registreren, inloggen (JWT), eigen profiel opvragen                                           |
-| Catalogus   | Producten bekijken (publiek); aanmaken en wijzigen (alleen admin)                             |
-| Bestellingen| Bestelling plaatsen met één of meer regels; eigen bestellingen bekijken; admin ziet alles     |
-| Voorraad    | Wordt bij het plaatsen gereserveerd, veilig bij gelijktijdige bestellingen                    |
+- [Features](#features)
+- [Tech stack](#tech-stack)
+- [Installation](#installation)
+- [Using the API](#using-the-api)
+- [Architecture](#architecture)
+- [Business rules](#business-rules)
+- [Error handling](#error-handling)
+- [Security](#security)
+- [Quality and tests](#quality-and-tests)
+- [Project structure](#project-structure)
+- [Conventions](#conventions)
+- [Known limitations and roadmap](#known-limitations-and-roadmap)
 
-## Techniek
+---
 
-| Onderdeel        | Keuze                                                            |
+## Features
+
+| Area      | What it does                                                                        |
+|-----------|-------------------------------------------------------------------------------------|
+| Customers | Register, log in (JWT), view own profile                                            |
+| Catalog   | Browse products (public); create and update them (admin only)                       |
+| Orders    | Place an order with one or more lines; view own orders; admins see all orders       |
+| Stock     | Reserved when an order is placed, safe under concurrent orders                      |
+
+## Tech stack
+
+| Component        | Choice                                                           |
 |------------------|------------------------------------------------------------------|
-| Taal             | PHP 8.4                                                          |
+| Language         | PHP 8.4                                                          |
 | Framework        | Symfony 8.1                                                      |
 | API              | API Platform 5 (JSON-LD/Hydra, OpenAPI)                          |
-| Database         | PostgreSQL 17 via Doctrine ORM 3 en Doctrine Migrations          |
-| Authenticatie    | LexikJWTAuthenticationBundle (stateless, `Bearer`-token)         |
-| Lokale omgeving  | [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17)      |
+| Database         | PostgreSQL 17 via Doctrine ORM 3 and Doctrine Migrations         |
+| Authentication   | LexikJWTAuthenticationBundle (stateless, `Bearer` token)         |
+| Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17)      |
 | Tests            | PHPUnit 13, `api-platform/test`                                  |
-| Kwaliteit        | PHPStan (level 5) met Symfony/Doctrine/PHPUnit-extensies, PHP-CS-Fixer (`@Symfony`) |
+| Quality          | PHPStan (level 5) with Symfony/Doctrine/PHPUnit extensions, PHP-CS-Fixer (`@Symfony`) |
 
 ---
 
-## Installatie
+## Installation
 
-### Vereisten
+### Requirements
 
-- [Docker](https://www.docker.com/) (Docker Desktop op Windows/macOS)
-- [DDEV](https://ddev.readthedocs.io/en/stable/users/install/) 1.24 of nieuwer
+- [Docker](https://www.docker.com/) (Docker Desktop on Windows/macOS)
+- [DDEV](https://ddev.readthedocs.io/en/stable/users/install/) 1.24 or newer
 
-PHP, Composer en PostgreSQL hoef je niet lokaal te installeren; die draaien in de DDEV-containers.
-Alle commando's hieronder draai je daarom via `ddev exec` of `ddev composer`.
+You don't need PHP, Composer or PostgreSQL installed locally; they run inside the DDEV containers.
+That's why every command below runs through `ddev exec` or `ddev composer`.
 
-### Stap voor stap
+### Step by step
 
 ```bash
-# 1. Containers starten
+# 1. Start the containers
 ddev start
 
-# 2. Dependencies installeren
+# 2. Install dependencies
 ddev composer install
 
-# 3. JWT-passphrase instellen (kies zelf een lange willekeurige waarde)
-#    .env.local wordt gebruikt in dev, .env.test.local in de testomgeving.
-#    Beide moeten dezelfde passphrase hebben, want ze delen hetzelfde sleutelpaar.
-echo 'JWT_PASSPHRASE=kies-een-lange-willekeurige-waarde' >> .env.local
-echo 'JWT_PASSPHRASE=kies-een-lange-willekeurige-waarde' >> .env.test.local
+# 3. Set the JWT passphrase (pick your own long random value)
+#    .env.local is used in dev, .env.test.local in the test environment.
+#    Both need the same passphrase, because they share the same key pair.
+echo 'JWT_PASSPHRASE=pick-a-long-random-value' >> .env.local
+echo 'JWT_PASSPHRASE=pick-a-long-random-value' >> .env.test.local
 
-# 4. Sleutelpaar voor het ondertekenen van tokens genereren (config/jwt/*.pem)
+# 4. Generate the key pair used to sign tokens (config/jwt/*.pem)
 ddev exec bin/console lexik:jwt:generate-keypair
 
-# 5. Database-schema aanmaken
+# 5. Create the database schema
 ddev exec bin/console doctrine:migrations:migrate --no-interaction
 
-# 6. Testdatabase aanmaken (Doctrine voegt automatisch het achtervoegsel _test toe)
+# 6. Create the test database (Doctrine appends the _test suffix automatically)
 ddev exec bin/console doctrine:database:create --env=test --if-not-exists
 ddev exec bin/console doctrine:migrations:migrate --env=test --no-interaction
 ```
 
-De API draait nu op **https://api-platform.ddev.site/api**.
-De interactieve documentatie (Swagger UI) staat op **https://api-platform.ddev.site/api/docs**.
+The API now runs at **https://api-platform.ddev.site/api**.
+The interactive documentation (Swagger UI) is at **https://api-platform.ddev.site/api/docs**.
 
-### Configuratie
+### Configuration
 
-`.env` staat in git en bevat alleen standaardwaarden. Echte waarden horen in een `.env.*.local`-bestand
-(staat in `.gitignore`) of in de [Symfony secrets vault](https://symfony.com/doc/current/configuration/secrets.html).
+`.env` is committed and holds defaults only. Real values belong in a `.env.*.local` file
+(git-ignored) or in the [Symfony secrets vault](https://symfony.com/doc/current/configuration/secrets.html).
 
-| Variabele            | Betekenis                                                        |
+| Variable             | Meaning                                                          |
 |----------------------|------------------------------------------------------------------|
-| `DATABASE_URL`       | Verbinding met PostgreSQL; DDEV zet deze automatisch             |
-| `JWT_SECRET_KEY`     | Pad naar de private key (`config/jwt/private.pem`)               |
-| `JWT_PUBLIC_KEY`     | Pad naar de public key (`config/jwt/public.pem`)                 |
-| `JWT_PASSPHRASE`     | Passphrase van de private key: **nooit in `.env` committen**     |
-| `CORS_ALLOW_ORIGIN`  | Regex met toegestane origins voor browser-clients                |
-| `APP_SECRET`         | Symfony-secret; in productie via de secrets vault                |
+| `DATABASE_URL`       | PostgreSQL connection; DDEV sets this automatically              |
+| `JWT_SECRET_KEY`     | Path to the private key (`config/jwt/private.pem`)               |
+| `JWT_PUBLIC_KEY`     | Path to the public key (`config/jwt/public.pem`)                 |
+| `JWT_PASSPHRASE`     | Passphrase of the private key: **never commit it to `.env`**     |
+| `CORS_ALLOW_ORIGIN`  | Regex of allowed origins for browser clients                     |
+| `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
-### Een beheerder aanmaken
+### Creating an administrator
 
-Er is (nog) geen endpoint om rollen toe te kennen. Registreer een gewone klant en geef die
-daarna de rol `ROLE_ADMIN`:
+There is no endpoint for assigning roles (yet). Register a regular customer and then give it
+the `ROLE_ADMIN` role:
 
 ```bash
 ddev exec bin/console dbal:run-sql \
   "UPDATE customer SET roles = '[\"ROLE_ADMIN\"]' WHERE email = 'admin@example.com'"
 ```
 
-Log daarna opnieuw in; de rollen staan in het token.
+Then log in again; the roles are stored in the token.
 
 ---
 
-## De API gebruiken
+## Using the API
 
-Alle endpoints vallen onder `/api`. Standaard spreekt de API **JSON-LD** (`application/ld+json`).
-Gewone JSON (`application/json`) werkt ook. Relaties worden aangeduid met een **IRI**, bijvoorbeeld
+All endpoints live under `/api`. The API speaks **JSON-LD** (`application/ld+json`) by default;
+plain JSON (`application/json`) works too. Relations are referenced by **IRI**, for example
 `/api/products/0199…`.
 
-### Overzicht van endpoints
+### Endpoints
 
-| Methode | Pad                     | Toegang                 | Omschrijving                                   |
+| Method  | Path                    | Access                  | Description                                    |
 |---------|-------------------------|-------------------------|------------------------------------------------|
-| POST    | `/api/register`         | publiek                 | Klantaccount aanmaken                          |
-| POST    | `/api/login`            | publiek                 | Inloggen; geeft `{"token": "<JWT>"}` terug     |
-| GET     | `/api/me`               | ingelogd                | Profiel van de ingelogde klant                 |
-| GET     | `/api/customers/{id}`   | eigenaar of admin       | Klant opvragen                                 |
-| GET     | `/api/products`         | publiek                 | Catalogus (gepagineerd, gesorteerd op naam)    |
-| GET     | `/api/products/{id}`    | publiek                 | Eén product                                    |
-| POST    | `/api/products`         | admin                   | Product aanmaken                               |
-| PATCH   | `/api/products/{id}`    | admin                   | Product wijzigen (`application/merge-patch+json`) |
-| POST    | `/api/orders`           | ingelogd                | Bestelling plaatsen                            |
-| GET     | `/api/orders`           | ingelogd                | Eigen bestellingen (admin: alle), nieuwste eerst |
-| GET     | `/api/orders/{id}`      | eigenaar of admin       | Eén bestelling                                 |
+| POST    | `/api/register`         | public                  | Create a customer account                      |
+| POST    | `/api/login`            | public                  | Log in; returns `{"token": "<JWT>"}`           |
+| GET     | `/api/me`               | authenticated           | Profile of the logged-in customer              |
+| GET     | `/api/customers/{id}`   | owner or admin          | Get a customer                                 |
+| GET     | `/api/products`         | public                  | Catalog (paginated, sorted by name)            |
+| GET     | `/api/products/{id}`    | public                  | A single product                               |
+| POST    | `/api/products`         | admin                   | Create a product                               |
+| PATCH   | `/api/products/{id}`    | admin                   | Update a product (`application/merge-patch+json`) |
+| POST    | `/api/orders`           | authenticated           | Place an order                                 |
+| GET     | `/api/orders`           | authenticated           | Own orders (admin: all), newest first          |
+| GET     | `/api/orders/{id}`      | owner or admin          | A single order                                 |
 
-### Voorbeeld: van registratie tot bestelling
+### Example: from registration to order
 
 ```bash
 API=https://api-platform.ddev.site/api
 
-# Registreren
+# Register
 curl -X POST $API/register -H 'Content-Type: application/json' -d '{
   "email": "jan@example.com",
   "firstName": "Jan",
@@ -152,14 +152,14 @@ curl -X POST $API/register -H 'Content-Type: application/json' -d '{
   "plainPassword": "S3cure-webshop-pass!"
 }'
 
-# Inloggen en token bewaren
+# Log in and keep the token
 TOKEN=$(curl -s -X POST $API/login -H 'Content-Type: application/json' \
   -d '{"email": "jan@example.com", "password": "S3cure-webshop-pass!"}' | jq -r .token)
 
-# Catalogus bekijken
+# Browse the catalog
 curl $API/products
 
-# Bestelling plaatsen
+# Place an order
 curl -X POST $API/orders \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
@@ -171,7 +171,7 @@ curl -X POST $API/orders \
   }'
 ```
 
-Antwoord (`201 Created`, ingekort):
+Response (`201 Created`, abbreviated):
 
 ```json
 {
@@ -183,7 +183,7 @@ Antwoord (`201 Created`, ingekort):
     {
       "product": "/api/products/0199aaaa-0000-7000-8000-000000000001",
       "sku": "MUG-01",
-      "productName": "Mok",
+      "productName": "Mug",
       "unitPrice": { "amount": 1250, "currency": "EUR" },
       "quantity": 2,
       "lineTotal": { "amount": 2500, "currency": "EUR" }
@@ -194,7 +194,7 @@ Antwoord (`201 Created`, ingekort):
 }
 ```
 
-### Product aanmaken (admin)
+### Creating a product (admin)
 
 ```bash
 curl -X POST $API/products \
@@ -202,111 +202,110 @@ curl -X POST $API/products \
   -H 'Content-Type: application/json' \
   -d '{
     "sku": "MUG-01",
-    "name": "Mok",
-    "description": "Stevige stenen mok, 350 ml",
+    "name": "Mug",
+    "description": "Sturdy stoneware mug, 350 ml",
     "price": { "amount": 1250, "currency": "EUR" },
     "stock": 100
   }'
 ```
 
-> **Bedragen staan altijd in centen** (de kleinste munteenheid): `1250` is € 12,50.
-> Zo ontstaan er nooit afrondingsfouten door floating-point-berekeningen.
+> **Amounts are always in cents** (the smallest currency unit): `1250` is € 12.50.
+> This way floating-point rounding errors can never occur.
 
 ---
 
-## Architectuur
+## Architecture
 
-### Lagen
+### Layers
 
 ```
-HTTP (API Platform)          Applicatie                   Domein                     Infrastructuur
-───────────────────          ──────────                   ──────                     ──────────────
+HTTP (API Platform)          Application                  Domain                     Infrastructure
+───────────────────          ───────────                  ──────                     ──────────────
 PlaceOrderInput (DTO)  ─┐
                         ├─▶  PlaceOrderProcessor  ─▶  PlaceOrderHandler  ─▶  Order::place()  ◀─▶  ProductRepository
 Validator (#[Assert])  ─┘       (adapter)               (use case,            Product::reserveStock()   OrderRepository
-                                                       transactie)           Money                     (Doctrine ORM)
+                                                       transaction)          Money                     (Doctrine ORM)
 ```
 
-1. **API Platform** deserialiseert het request naar `PlaceOrderInput` en valideert dat met de
-   Validator-constraints op de DTO.
-2. **`PlaceOrderProcessor`** (adapter) vertaalt de DTO naar een `PlaceOrder`-command, met de
-   ingelogde klant erbij.
-3. **`PlaceOrderHandler`** (use case) opent een transactie, laadt de producten met een write-lock
-   en laat het domein het werk doen.
-4. **`Order::place()`** controleert de bedrijfsregels, reserveert voorraad en berekent het totaal.
-5. Bij succes volgt een commit en geeft API Platform de order terug als `201`. Bij een fout volgt een
-   rollback en wordt er niets opgeslagen.
+1. **API Platform** deserializes the request into `PlaceOrderInput` and validates it with the
+   Validator constraints on the DTO.
+2. **`PlaceOrderProcessor`** (adapter) turns the DTO into a `PlaceOrder` command, together with
+   the logged-in customer.
+3. **`PlaceOrderHandler`** (use case) opens a transaction, loads the products with a write lock
+   and lets the domain do the work.
+4. **`Order::place()`** checks the business rules, reserves stock and calculates the total.
+5. On success the transaction commits and API Platform returns the order as `201`. On failure it
+   rolls back and nothing is stored.
 
-### SOLID in de praktijk
+### SOLID in practice
 
-| Principe                  | Waar                                                                                       |
+| Principle                 | Where                                                                                      |
 |---------------------------|--------------------------------------------------------------------------------------------|
-| **S**ingle Responsibility | Processor = HTTP-vertaling, handler = transactie, entities = bedrijfsregels, repository = opslag |
-| **O**pen/Closed           | Nieuwe bedrijfsregel = nieuwe subklasse van `OrderingException`; de 422-mapping hoeft niet te veranderen |
-| **L**iskov Substitution   | Elke implementatie van de repository-interfaces moet hetzelfde contract nakomen (bijv. een in-memory variant voor tests) |
-| **I**nterface Segregation | Kleine repository-interfaces met alleen wat de use case nodig heeft (`findForUpdate`, `add`) |
-| **D**ependency Inversion  | `PlaceOrderHandler` hangt af van interfaces en `Psr\Clock\ClockInterface`, niet van Doctrine-klassen |
+| **S**ingle Responsibility | Processor = HTTP translation, handler = transaction, entities = business rules, repository = storage |
+| **O**pen/Closed           | A new business rule = a new subclass of `OrderingException`; the 422 mapping doesn't change |
+| **L**iskov Substitution   | Every implementation of the repository interfaces must honor the same contract (e.g. an in-memory variant for tests) |
+| **I**nterface Segregation | Small repository interfaces with only what the use case needs (`findForUpdate`, `add`)     |
+| **D**ependency Inversion  | `PlaceOrderHandler` depends on interfaces and `Psr\Clock\ClockInterface`, not on Doctrine classes |
 
 ### Design patterns
 
-| Pattern                 | Klasse(n)                                         | Waarom                                                     |
+| Pattern                 | Class(es)                                         | Why                                                        |
 |-------------------------|---------------------------------------------------|------------------------------------------------------------|
-| Repository              | `ProductRepository`, `OrderRepository`            | Opslaglogica gescheiden van domein en use case             |
-| Command + Handler       | `PlaceOrder`, `PlaceOrderHandler`                 | Use case los van HTTP; ook bruikbaar vanuit CLI of Messenger |
-| Adapter                 | `PlaceOrderProcessor`                             | Koppelt API Platform aan de use case                       |
-| Data Transfer Object    | `PlaceOrderInput`, `OrderLineInput`               | API-contract los van het domeinmodel                       |
-| Aggregate Root          | `Order` (met `OrderLine`)                         | Regels kunnen alleen via de order ontstaan                 |
-| Factory Method          | `Order::place()`, `Money::zero()`, named constructors op exceptions | Altijd een geldig object; intentie in de naam |
-| Value Object            | `Money` (Doctrine embeddable, `readonly`)         | Onveranderlijk, zelfvaliderend, geen float-afronding       |
-| Snapshot                | `OrderLine` kopieert SKU, naam en prijs           | Latere catalogus-wijzigingen veranderen oude orders niet   |
-| Query Extension         | `CurrentCustomerOrdersExtension`                  | Filtert `GET /api/orders` automatisch op de ingelogde klant |
+| Repository              | `ProductRepository`, `OrderRepository`            | Storage logic separated from domain and use case           |
+| Command + Handler       | `PlaceOrder`, `PlaceOrderHandler`                 | Use case independent of HTTP; reusable from CLI or Messenger |
+| Adapter                 | `PlaceOrderProcessor`                             | Connects API Platform to the use case                      |
+| Data Transfer Object    | `PlaceOrderInput`, `OrderLineInput`               | API contract decoupled from the domain model               |
+| Aggregate Root          | `Order` (with `OrderLine`)                        | Lines can only be created through the order                |
+| Factory Method          | `Order::place()`, `Money::zero()`, named constructors on exceptions | Always a valid object; intent in the name |
+| Value Object            | `Money` (Doctrine embeddable, `readonly`)         | Immutable, self-validating, no float rounding              |
+| Snapshot                | `OrderLine` copies SKU, name and price            | Later catalog changes never alter past orders              |
+| Query Extension         | `CurrentCustomerOrdersExtension`                  | Automatically filters `GET /api/orders` to the logged-in customer |
 
-### Gelijktijdigheid (concurrency)
+### Concurrency
 
-Twee klanten die tegelijk het laatste exemplaar bestellen mogen niet allebei slagen. Daarom:
+Two customers ordering the last item at the same time must not both succeed. That's why:
 
-- `ProductRepository::findForUpdate()` laadt producten met `SELECT … FOR UPDATE` (pessimistic
-  write lock), binnen de transactie van de handler.
-- Producten worden altijd **op id gesorteerd** gelockt, zodat twee orders met dezelfde producten
-  elkaar niet in een deadlock houden.
-- `Query::HINT_REFRESH` zorgt dat de voorraad ná het verkrijgen van de lock uit de database wordt
-  gelezen, ook als het product al in de identity map zat.
-- Bij een exception doet `EntityManager::wrapInTransaction()` een rollback en sluit de
-  EntityManager. Voorraad die al in het geheugen was afgeboekt, kan daardoor nooit alsnog
-  worden opgeslagen.
-
----
-
-## Bedrijfsregels
-
-| Regel                                                        | Afgedwongen in                      | Resultaat |
-|--------------------------------------------------------------|-------------------------------------|-----------|
-| Een bestelling heeft 1 tot 50 regels                         | `PlaceOrderInput` (Validator) en `Order::place()` | 422 |
-| Aantal per regel is 1 tot 100                                | `OrderLineInput` (Validator)        | 422       |
-| Dubbele regels voor hetzelfde product worden samengevoegd    | `PlaceOrder`                        | —         |
-| Product moet bestaan                                         | API Platform (IRI) en `PlaceOrderHandler` | 400 / 422 |
-| Product moet actief zijn                                     | `Product::reserveStock()`           | 422       |
-| Voldoende voorraad, anders gaat de hele bestelling niet door | `Product::reserveStock()` + transactie | 422    |
-| Alle producten in één valuta                                 | `Order::place()`                    | 422       |
-| Prijs is nooit negatief                                      | `Money`                             | 422       |
-| SKU is uniek en bevat alleen hoofdletters, cijfers en `-`    | `Product` (Validator, `UniqueEntity`) | 422     |
+- `ProductRepository::findForUpdate()` loads products with `SELECT … FOR UPDATE` (pessimistic
+  write lock), inside the handler's transaction.
+- Products are always locked **in id order**, so two orders containing the same products can't
+  deadlock each other.
+- `Query::HINT_REFRESH` makes sure stock is read from the database *after* the lock is acquired,
+  even when the product was already in the identity map.
+- On an exception, `EntityManager::wrapInTransaction()` rolls back and closes the EntityManager.
+  Stock already deducted in memory can therefore never be flushed afterwards.
 
 ---
 
-## Foutafhandeling
+## Business rules
 
-Fouten komen terug als [RFC 7807 Problem Details](https://www.rfc-editor.org/rfc/rfc7807)
-(in JSON-LD als Hydra `Error`).
+| Rule                                                        | Enforced in                          | Result |
+|-------------------------------------------------------------|--------------------------------------|--------|
+| An order has 1 to 50 lines                                  | `PlaceOrderInput` (Validator) and `Order::place()` | 422 |
+| Quantity per line is 1 to 100                               | `OrderLineInput` (Validator)         | 422    |
+| Duplicate lines for the same product are merged             | `PlaceOrder`                         | —      |
+| The product must exist                                      | API Platform (IRI) and `PlaceOrderHandler` | 400 / 422 |
+| The product must be active                                  | `Product::reserveStock()`            | 422    |
+| Enough stock, otherwise the whole order is rejected         | `Product::reserveStock()` + transaction | 422 |
+| All products in one currency                                | `Order::place()`                     | 422    |
+| A price is never negative                                   | `Money`                              | 422    |
+| SKU is unique and contains only uppercase letters, digits and `-` | `Product` (Validator, `UniqueEntity`) | 422 |
 
-| Status | Wanneer                                                                  |
+---
+
+## Error handling
+
+Errors are returned as [RFC 7807 Problem Details](https://www.rfc-editor.org/rfc/rfc7807)
+(in JSON-LD as a Hydra `Error`).
+
+| Status | When                                                                     |
 |--------|--------------------------------------------------------------------------|
-| 400    | Ongeldige JSON of een onbekende IRI                                      |
-| 401    | Geen of een ongeldig token                                               |
-| 403    | Ingelogd, maar geen toegang (bijv. andermans bestelling, geen admin)     |
-| 404    | Resource bestaat niet                                                    |
-| 422    | Validatiefout (`violations`) of overtreden bedrijfsregel (`detail`)       |
+| 400    | Invalid JSON or an unknown IRI                                           |
+| 401    | Missing or invalid token                                                 |
+| 403    | Authenticated but not allowed (e.g. someone else's order, not an admin)  |
+| 404    | Resource does not exist                                                  |
+| 422    | Validation error (`violations`) or broken business rule (`detail`)       |
 
-Voorbeeld van een overtreden bedrijfsregel:
+Example of a broken business rule:
 
 ```json
 {
@@ -317,126 +316,127 @@ Voorbeeld van een overtreden bedrijfsregel:
 }
 ```
 
-**Hoe werkt dit technisch?**
+**How this works technically:**
 
-- Alle bedrijfsfouten erven van `App\Exception\OrderingException`.
-- De order-operatie mapt die basisklasse via `exceptionToStatus` naar 422.
-- Met `#[WithLogLevel(LogLevel::INFO)]` worden ze gelogd als verwachte uitkomst, niet als
-  `critical`, zodat ze in productie geen alarm veroorzaken.
-
----
-
-## Beveiliging
-
-- **Stateless JWT:** `POST /api/login` (firewall `login`, `json_login`) geeft een token. Alle andere
-  `/api`-routes lezen het token uit de `Authorization: Bearer …`-header (firewall `api`).
-- **Autorisatie per operatie:** via `security:`-expressies in de `#[ApiResource]`-attributen, bijvoorbeeld
-  `is_granted('ROLE_ADMIN') or (is_granted('ROLE_USER') and object.isPlacedBy(user))`.
-- **Collecties:** `CurrentCustomerOrdersExtension` beperkt de orderlijst tot de eigen orders. Dat
-  gebeurt in de query zelf, zodat er geen andermans data kan uitlekken via paginering of filters.
-- **Wachtwoorden:** gehasht met de `auto`-hasher en automatisch geüpgraded bij inloggen
-  (`PasswordUpgraderInterface`). Bij registratie wordt het wachtwoord gecontroleerd tegen bekende
-  datalekken (`NotCompromisedPassword`). Het plain-text wachtwoord wordt nooit opgeslagen of teruggestuurd.
-- **Identifiers:** UUID v7, dus niet te raden of op te sommen.
-- **Secrets:** private keys (`config/jwt/*.pem`) en `.env.*.local` staan in `.gitignore`.
+- All business errors extend `App\Exception\OrderingException`.
+- The order operation maps that base class to 422 via `exceptionToStatus`.
+- `#[WithLogLevel(LogLevel::INFO)]` logs them as an expected outcome instead of `critical`, so
+  they don't trigger alerts in production.
 
 ---
 
-## Kwaliteit en tests
+## Security
 
-Alles draait via Composer-scripts:
+- **Stateless JWT:** `POST /api/login` (firewall `login`, `json_login`) returns a token. All other
+  `/api` routes read the token from the `Authorization: Bearer …` header (firewall `api`).
+- **Authorization per operation:** through `security:` expressions in the `#[ApiResource]`
+  attributes, for example `is_granted('ROLE_ADMIN') or (is_granted('ROLE_USER') and object.isPlacedBy(user))`.
+- **Collections:** `CurrentCustomerOrdersExtension` limits the order list to the customer's own
+  orders. This happens in the query itself, so no one else's data can leak through pagination or
+  filters.
+- **Passwords:** hashed with the `auto` hasher and upgraded automatically on login
+  (`PasswordUpgraderInterface`). On registration the password is checked against known data
+  breaches (`NotCompromisedPassword`). The plain-text password is never stored or returned.
+- **Identifiers:** UUID v7, so they can't be guessed or enumerated.
+- **Secrets:** private keys (`config/jwt/*.pem`) and `.env.*.local` are git-ignored.
+
+---
+
+## Quality and tests
+
+Everything runs through Composer scripts:
 
 ```bash
-ddev composer qa        # alles hieronder achter elkaar
-ddev composer cs        # code style controleren (PHP-CS-Fixer, dry-run met diff)
-ddev composer cs:fix    # code style automatisch herstellen
-ddev composer phpstan   # statische analyse (level 5)
+ddev composer qa        # all of the below in sequence
+ddev composer cs        # check code style (PHP-CS-Fixer, dry run with diff)
+ddev composer cs:fix    # fix code style automatically
+ddev composer phpstan   # static analysis (level 5)
 ddev composer test      # PHPUnit
 ```
 
 ### Tests
 
-| Suite                          | Type                    | Wat wordt getest                                           |
+| Suite                          | Type                    | What is tested                                             |
 |--------------------------------|-------------------------|------------------------------------------------------------|
-| `tests/Unit/Entity/MoneyTest`  | Unit                    | Rekenen, gelijkheid, validatie van `Money`                 |
-| `tests/Unit/Entity/OrderTest`  | Unit                    | Bedrijfsregels van `Order::place()`, snapshot van prijzen  |
-| `tests/Api/CustomerAuthTest`   | Functioneel (HTTP)      | Registratie, login, toegang tot profielen                  |
-| `tests/Api/ProductTest`        | Functioneel (HTTP)      | Publieke catalogus, admin-beheer, validatie, JSON-schema   |
-| `tests/Api/PlaceOrderTest`     | Functioneel (HTTP)      | Bestellen, voorraad, rollback, validatie, autorisatie      |
+| `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
+| `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots        |
+| `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, login, access to profiles                    |
+| `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, admin management, validation, JSON schema  |
+| `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization       |
 
-De functionele tests draaien tegen een echte PostgreSQL-testdatabase (`db_test`) en leegmaken de
-tabellen vóór elke test. Gedeelde fixtures en login-helpers staan in `tests/Api/WebshopTestTrait.php`.
+The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
+tables before every test. Shared fixtures and login helpers live in `tests/Api/WebshopTestTrait.php`.
 
-### Statische analyse
+### Static analysis
 
-- `phpstan.dist.neon` laadt de Symfony-container (`var/cache/dev/…Container.xml`) en de echte
-  Doctrine-mapping (`tests/object-manager.php`). Zo controleert PHPStan ook service-ID's,
-  repository-types en DQL.
-- Wil je lokaal andere instellingen? Maak dan een `phpstan.neon` aan (die staat in `.gitignore`).
+- `phpstan.dist.neon` loads the Symfony container (`var/cache/dev/…Container.xml`) and the real
+  Doctrine mapping (`tests/object-manager.php`). That way PHPStan also checks service IDs,
+  repository types and DQL.
+- Want different settings locally? Create a `phpstan.neon` (it's git-ignored).
 
 ---
 
-## Projectstructuur
+## Project structure
 
 ```
-├── config/                  Symfony-configuratie (packages, routes, services)
-├── migrations/              Doctrine-migraties (nooit met de hand schema's wijzigen)
+├── config/                  Symfony configuration (packages, routes, services)
+├── migrations/              Doctrine migrations (never change the schema by hand)
 ├── src/
-│   ├── Controller/          LoginController (route voor de json_login-firewall)
-│   ├── Doctrine/            API Platform query-extensies
-│   ├── Dto/                 Input-DTO's van de API
-│   ├── Entity/              Doctrine-entities en API-resources
+│   ├── Controller/          LoginController (route for the json_login firewall)
+│   ├── Doctrine/            API Platform query extensions
+│   ├── Dto/                 API input DTOs
+│   ├── Entity/              Doctrine entities and API resources
 │   │   └── Embeddable/      Value objects (Money)
 │   ├── Enum/                Backed enums (OrderStatus)
-│   ├── Exception/           Domein-exceptions
-│   ├── Ordering/            Use case: PlaceOrder-command en handler
-│   ├── Repository/          Repository-interfaces en Doctrine-implementaties
-│   └── State/               API Platform state providers en processors
+│   ├── Exception/           Domain exceptions
+│   ├── Ordering/            Use case: PlaceOrder command and handler
+│   ├── Repository/          Repository interfaces and Doctrine implementations
+│   └── State/               API Platform state providers and processors
 ├── tests/
-│   ├── Api/                 Functionele HTTP-tests
-│   └── Unit/                Unit-tests van het domein
+│   ├── Api/                 Functional HTTP tests
+│   └── Unit/                Domain unit tests
 ├── .php-cs-fixer.dist.php   Code style (@Symfony)
-├── phpstan.dist.neon        Statische analyse (level 5)
-└── phpunit.dist.xml         PHPUnit-configuratie
+├── phpstan.dist.neon        Static analysis (level 5)
+└── phpunit.dist.xml         PHPUnit configuration
 ```
 
 ---
 
-## Werkafspraken
+## Conventions
 
-- **Nieuwe packages** installeer je met `composer require`, zodat de Flex-recipe de configuratie
-  aanmaakt. Pas `config/bundles.php` niet met de hand aan.
-- **Metadata via PHP-attributen**, dus `#[ApiResource]`, `#[Assert\…]`, `#[ORM\…]`, `#[Autowire]`.
-  Geen YAML- of XML-routing.
-- **Autowiring**: dependencies via de constructor met type-hints. Een YAML-servicedefinitie is het
-  laatste redmiddel.
-- **Schemawijzigingen** altijd via een migratie:
+- **New packages** are installed with `composer require`, so the Flex recipe generates the
+  configuration. Don't edit `config/bundles.php` by hand.
+- **Metadata via PHP attributes**: `#[ApiResource]`, `#[Assert\…]`, `#[ORM\…]`, `#[Autowire]`.
+  No YAML or XML routing.
+- **Autowiring**: dependencies through the constructor with type hints. A YAML service
+  definition is the last resort.
+- **Schema changes** always go through a migration:
   ```bash
   ddev exec bin/console make:migration
   ddev exec bin/console doctrine:migrations:migrate
   ```
-- **Docblocks**: elke functie heeft een samenvattende zin. `@param`, `@return` en `@throws` alleen
-  als ze iets toevoegen aan de type-hints (de `@Symfony`-ruleset verwijdert overbodige tags).
-- **Definition of done**: `ddev composer qa` is groen en de feature heeft een test die hem aanroept
-  zoals een client dat doet.
-- **Bij problemen** eerst `var/log/dev.log` en de profiler (`/_profiler`) bekijken.
+- **Docblocks**: every function has a summary sentence. Use `@param`, `@return` and `@throws`
+  only when they add something to the type hints (the `@Symfony` ruleset removes redundant tags).
+- **Definition of done**: `ddev composer qa` passes and the feature has a test that calls it the
+  way a client would.
+- **When something breaks**, check `var/log/dev.log` and the profiler (`/_profiler`) first.
 
 ---
 
-## Bekende beperkingen en roadmap
+## Known limitations and roadmap
 
-- **Idempotency:** een retry van `POST /api/orders` na een time-out kan een dubbele bestelling
-  opleveren. Een idempotency-key header lost dit op.
-- **Order-lifecycle:** `OrderStatus` kent nu alleen `placed`. Betaald, verzonden en geannuleerd
-  (met teruggeboekte voorraad) volgen nog, bijvoorbeeld met de Symfony Workflow-component.
-- **Beheer:** er is geen endpoint of console-command om beheerders aan te maken.
-- **Catalogus:** inactieve producten staan nog in de publieke lijst. Ze zijn wel niet te bestellen.
-- **Notificaties:** een orderbevestiging per e-mail, asynchroon via Symfony Messenger en Mailer.
-- **Concurrency-test:** de locking is ontworpen voor gelijktijdige bestellingen, maar er is nog
-  geen test die echt parallelle requests uitvoert.
+- **Idempotency:** retrying `POST /api/orders` after a timeout can create a duplicate order.
+  An idempotency-key header would solve this.
+- **Order lifecycle:** `OrderStatus` currently only knows `placed`. Paid, shipped and cancelled
+  (with stock returned) are still to come, for example with the Symfony Workflow component.
+- **Administration:** there is no endpoint or console command to create administrators.
+- **Catalog:** inactive products still show up in the public list, although they can't be ordered.
+- **Notifications:** an order confirmation email, sent asynchronously via Symfony Messenger and Mailer.
+- **Concurrency test:** the locking is designed for concurrent orders, but there is no test yet
+  that actually fires parallel requests.
 
 ---
 
-## Licentie
+## License
 
-MIT. Zie [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
