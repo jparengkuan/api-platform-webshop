@@ -14,7 +14,7 @@ runs:
       uses: shivammathur/setup-php@v2
       with:
         php-version: '8.4'
-        extensions: ctype, iconv, intl, pdo_pgsql
+        extensions: amqp, ctype, iconv, intl, pdo_pgsql
         tools: composer, ${{ inputs.tools }}
         coverage: none
 

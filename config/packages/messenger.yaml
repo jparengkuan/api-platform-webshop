@@ -1,0 +1,25 @@
+framework:
+    messenger:
+        transports:
+            # Integration events for other systems: published to RabbitMQ as JSON, never consumed here.
+            events:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                serializer: messenger.transport.symfony_serializer
+                options:
+                    exchange:
+                        name: webshop.events
+                        type: topic
+                    # Declared on the first publish, so events are kept until a consumer reads them.
+                    queues:
+                        order_placed:
+                            binding_keys: [!php/const App\Message\OrderPlaced::ROUTING_KEY]
+
+        routing:
+            App\Message\OrderPlaced: events
+
+when@test:
+    framework:
+        messenger:
+            transports:
+                # serialize=true: every test also proves the event survives the JSON round trip.
+                events: 'in-memory://?serialize=true'

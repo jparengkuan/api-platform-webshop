@@ -15,7 +15,9 @@ use_dns_when_possible: true
 composer_version: "2"
 web_environment:
     - DATABASE_URL=postgresql://db:db@db:5432/db?serverVersion=17&charset=utf8
+    - MESSENGER_TRANSPORT_DSN=amqp://rabbitmq:rabbitmq@rabbitmq:5672/%2f
 corepack_enable: false
+webimage_extra_packages: ["php${DDEV_PHP_VERSION}-amqp"]
 default_container_timeout: "240"
 
 # Key features of DDEV's config.yaml:

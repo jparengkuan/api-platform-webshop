@@ -10,6 +10,7 @@ WORKDIR /app
 
 RUN set -eux; \
 	install-php-extensions \
+		amqp \
 		apcu \
 		intl \
 		opcache \

@@ -5,6 +5,9 @@ namespace App\Tests\Api;
 use ApiPlatform\Test\ApiTestCase;
 use ApiPlatform\Test\Client;
 use App\Entity\Order;
+use App\Message\OrderPlaced;
+use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 
 final class PlaceOrderTest extends ApiTestCase
 {
@@ -97,6 +100,38 @@ final class PlaceOrderTest extends ApiTestCase
     }
 
     /**
+     * A placed order is announced to RabbitMQ with plain values that survive the JSON round trip.
+     */
+    public function testPlacedOrderIsPublished(): void
+    {
+        $customer = $this->createCustomer('jan@example.com');
+        $mug = $this->createProduct('MUG-01', 1250, 10);
+        $token = $this->login('jan@example.com');
+
+        $response = $this->client->request('POST', '/api/orders', ['auth_bearer' => $token, 'json' => ['lines' => [
+            ['product' => $this->iri($mug), 'quantity' => 2],
+        ]]]);
+
+        self::assertResponseStatusCodeSame(201);
+        $sent = $this->sentEvents();
+        self::assertCount(1, $sent);
+
+        $event = $sent[0]->getMessage();
+        self::assertInstanceOf(OrderPlaced::class, $event);
+        self::assertSame($response->toArray()['@id'], '/api/orders/'.$event->orderId);
+        self::assertSame($customer->getId()->toRfc4122(), $event->customerId);
+        self::assertSame(2500, $event->totalAmount);
+        self::assertSame('EUR', $event->currency);
+        self::assertSame([[
+            'productId' => $mug->getId()->toRfc4122(),
+            'sku' => 'MUG-01',
+            'name' => $mug->getName(),
+            'quantity' => 2,
+            'unitPrice' => 1250,
+        ]], $event->lines);
+    }
+
+    /**
      * When one line lacks stock, nothing is ordered and no stock is taken for the other lines.
      */
     public function testInsufficientStockRejectsWholeOrder(): void
@@ -114,6 +149,7 @@ final class PlaceOrderTest extends ApiTestCase
         self::assertJsonContains(['detail' => 'Insufficient stock for "SHIRT-01": 2 requested, 1 available.']);
         self::assertSame(10, $this->reloadProduct($mug)->getStock(), 'Stock reserved for earlier lines must be rolled back.');
         self::assertSame(0, $this->entityManager()->getRepository(Order::class)->count());
+        self::assertSame([], $this->sentEvents(), 'A rejected order must not be announced.');
     }
 
     /**
@@ -212,5 +248,18 @@ final class PlaceOrderTest extends ApiTestCase
         self::assertJsonContains(['totalItems' => 2]);
         $this->client->request('GET', $jansOrder, ['auth_bearer' => $admin]);
         self::assertResponseIsSuccessful();
+    }
+
+    /**
+     * Returns the events published during the last request (decoded again from their JSON form).
+     *
+     * @return list<Envelope>
+     */
+    private function sentEvents(): array
+    {
+        $transport = self::getContainer()->get('messenger.transport.events');
+        self::assertInstanceOf(InMemoryTransport::class, $transport);
+
+        return array_values([...$transport->getSent()]);
     }
 }
