@@ -50,6 +50,7 @@ def test_publishes_invoice_generated_then_acknowledges(order_placed_body: bytes)
     assert properties.content_type == "application/json"
     assert properties.message_id == payload["invoiceNumber"]
     assert properties.delivery_mode == 2
+    assert properties.headers == {"type": "invoice.generated"}, "Symfony Messenger reads the type from here"
     assert ack == ("ack", 7), "The order event is acknowledged only after the invoice was published"
 
 

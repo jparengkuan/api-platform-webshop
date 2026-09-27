@@ -16,8 +16,14 @@ composer_version: "2"
 web_environment:
     - DATABASE_URL=postgresql://db:db@db:5432/db?serverVersion=17&charset=utf8
     - MESSENGER_TRANSPORT_DSN=amqp://rabbitmq:rabbitmq@rabbitmq:5672/%2f
+    - MAILER_DSN=smtp://localhost:1025
 corepack_enable: false
 webimage_extra_packages: ["php${DDEV_PHP_VERSION}-amqp"]
+# Messenger worker: mails the invoices from the invoice service (Mailpit shows them: ddev mailpit).
+web_extra_daemons:
+    - name: "messenger-worker"
+      command: "php bin/console messenger:consume invoices --time-limit=3600 -vv"
+      directory: /var/www/html
 default_container_timeout: "240"
 
 # Key features of DDEV's config.yaml:

@@ -61,6 +61,8 @@ class OrderPlacedHandler:
                 delivery_mode=pika.DeliveryMode.Persistent,
                 message_id=payload["invoiceNumber"],
                 type=INVOICE_GENERATED,
+                # Symfony Messenger (the API's mailer worker) reads the event type from this header.
+                headers={"type": INVOICE_GENERATED},
             ),
             mandatory=True,
         )

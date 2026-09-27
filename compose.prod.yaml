@@ -1,5 +1,6 @@
 # Production stack:  reverse proxy (TLS)  →  varnish :80  →  php :80  →  database
 #                                                                 └──→  rabbitmq (events)  ⇄  invoice
+#                                                  worker (mails invoices)  ◀──┘
 #
 # Runs behind the hosting platform's reverse proxy (e.g. Coolify), which terminates TLS and
 # forwards the domain to the "varnish" service on port 80. Nothing is exposed publicly by
@@ -9,6 +10,22 @@
 #   docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build
 #
 # Standalone on purpose: compose.yaml/compose.override.yaml belong to the Doctrine recipe.
+
+# Configuration shared by the app (php) and the Messenger worker, which run the same image.
+x-app-environment: &app-environment
+  APP_SECRET: ${APP_SECRET:?Set APP_SECRET}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-app}?serverVersion=17&charset=utf8
+  # Encrypts the OAuth2 signing key (in the jwt_keys volume) and the authorization codes.
+  OAUTH_PASSPHRASE: ${OAUTH_PASSPHRASE:?Set OAUTH_PASSPHRASE}
+  OAUTH_ENCRYPTION_KEY: ${OAUTH_ENCRYPTION_KEY:?Set OAUTH_ENCRYPTION_KEY}
+  CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-^https?://localhost(:[0-9]+)?$}
+  # Where API Platform sends BAN requests to invalidate cached responses.
+  VARNISH_URL: http://varnish
+  # RabbitMQ: the app publishes OrderPlaced, the worker consumes invoice.generated.
+  MESSENGER_TRANSPORT_DSN: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}@rabbitmq:5672/%2f
+  # Sends the invoice emails, e.g. smtp://user:pass@smtp.example.com:587 (null://null sends nothing).
+  MAILER_DSN: ${MAILER_DSN:?Set MAILER_DSN}
+  MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
 
 services:
   varnish:
@@ -30,7 +47,7 @@ services:
         condition: service_healthy
 
   php:
-    build:
+    build: &app-build
       context: .
       target: prod
       args:
@@ -39,24 +56,34 @@ services:
     image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
+      <<: *app-environment
       # Plain HTTP: TLS is terminated by the reverse proxy in front of Varnish.
       SERVER_NAME: ':80'
-      APP_SECRET: ${APP_SECRET:?Set APP_SECRET}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-app}?serverVersion=17&charset=utf8
-      # Encrypts the OAuth2 signing key (in the jwt_keys volume) and the authorization codes.
-      OAUTH_PASSPHRASE: ${OAUTH_PASSPHRASE:?Set OAUTH_PASSPHRASE}
-      OAUTH_ENCRYPTION_KEY: ${OAUTH_ENCRYPTION_KEY:?Set OAUTH_ENCRYPTION_KEY}
-      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-^https?://localhost(:[0-9]+)?$}
-      # Where API Platform sends BAN requests to invalidate cached responses.
-      VARNISH_URL: http://varnish
-      # RabbitMQ that receives the integration events (OrderPlaced).
-      MESSENGER_TRANSPORT_DSN: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}@rabbitmq:5672/%2f
       # Staging/test only: replace all data with the demo fixtures on every start.
       RESET_DEMO_DATA: ${RESET_DEMO_DATA:-0}
     volumes:
       - jwt_keys:/app/config/jwt
     depends_on:
       database:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Messenger worker: the same image, consuming invoice.generated and mailing each invoice PDF to
+  # the customer. It stops after an hour (or 128 MB) and Docker starts a fresh one.
+  worker:
+    # Same build as php (fully cached), so the image exists even when this service starts first.
+    build: *app-build
+    image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ['bin/console', 'messenger:consume', 'invoices', '--time-limit=3600', '--memory-limit=128M', '-vv']
+    environment: *app-environment
+    # The image's health check probes the web server, which doesn't run here.
+    healthcheck:
+      disable: true
+    depends_on:
+      # php has run the migrations by the time it's healthy.
+      php:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy

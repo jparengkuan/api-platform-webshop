@@ -14,6 +14,23 @@ framework:
                         order_placed:
                             binding_keys: [!php/const App\Message\OrderPlaced::ROUTING_KEY]
 
+            # Events from the Python invoice service, consumed by the worker (messenger:consume invoices).
+            invoices:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                serializer: App\Messenger\InvoiceEventSerializer
+                # A failed email is retried after 1, 5 and 25 minutes, then dropped (and logged).
+                retry_strategy:
+                    max_retries: 3
+                    delay: 60000
+                    multiplier: 5
+                options:
+                    exchange:
+                        name: webshop.events
+                        type: topic
+                    queues:
+                        invoice_generated:
+                            binding_keys: [!php/const App\Message\InvoiceGenerated::ROUTING_KEY]
+
         routing:
             App\Message\OrderPlaced: events
 
@@ -23,3 +40,4 @@ when@test:
             transports:
                 # serialize=true: every test also proves the event survives the JSON round trip.
                 events: 'in-memory://?serialize=true'
+                invoices: 'in-memory://'

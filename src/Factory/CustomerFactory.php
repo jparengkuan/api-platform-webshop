@@ -53,11 +53,12 @@ final class CustomerFactory extends PersistentObjectFactory
         $firstName = self::faker()->firstName();
         $lastName = self::faker()->lastName();
 
-        // The email matches the name, e.g. "Floris de Vries" becomes "floris.devries123@gmail.com".
+        // The email matches the name, e.g. "Floris de Vries" becomes "floris.devries123@example.net".
+        // Only the reserved example domains (RFC 2606): staging sends real emails, which must never reach a stranger.
         $localPart = u($firstName.'.'.$lastName)->ascii()->lower()->replaceMatches('/[^a-z.]/', '');
 
         return [
-            'email' => sprintf('%s%d@%s', $localPart, self::faker()->unique()->numberBetween(1, 9999), self::faker()->freeEmailDomain()),
+            'email' => sprintf('%s%d@%s', $localPart, self::faker()->unique()->numberBetween(1, 9999), self::faker()->randomElement(['example.com', 'example.net', 'example.org'])),
             'firstName' => $firstName,
             'lastName' => $lastName,
             'roles' => [],
