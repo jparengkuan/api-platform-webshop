@@ -84,6 +84,10 @@
             "phpstan analyse --memory-limit=1G"
         ],
         "test": "@php bin/phpunit",
+        "fixtures": [
+            "@putenv FOUNDRY_FAKER_SEED=1234",
+            "@php bin/console foundry:load-fixtures --no-interaction"
+        ],
         "qa": [
             "@cs",
             "@phpstan",
@@ -110,6 +114,7 @@
         "phpunit/phpunit": "^13.3",
         "symfony/browser-kit": "8.1.*",
         "symfony/css-selector": "8.1.*",
-        "symfony/maker-bundle": "^1.68"
+        "symfony/maker-bundle": "^1.68",
+        "zenstruck/foundry": "^2.13"
     }
 }

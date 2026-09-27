@@ -1,0 +1,15 @@
+when@dev: &dev
+    # See full configuration: https://symfony.com/bundles/ZenstruckFoundryBundle/current/index.html#full-default-bundle-configuration
+    zenstruck_foundry:
+        faker:
+            # Dutch names, addresses and phone numbers for a Dutch webshop.
+            locale: nl_NL
+        persistence:
+            # Flush only once per call of `PersistentObjectFactory::create()`
+            flush_once: true
+        orm:
+            reset:
+                # Build the schema from the migrations, never from the mapping directly.
+                mode: migrate
+
+when@test: *dev

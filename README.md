@@ -46,6 +46,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Authentication   | LexikJWTAuthenticationBundle (stateless, `Bearer` token)         |
 | Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17)      |
 | Tests            | PHPUnit 13, `api-platform/test`                                  |
+| Test data        | Foundry (`zenstruck/foundry`) factories and stories with Faker (`nl_NL`) |
 | Quality          | PHPStan (level 5) with Symfony/Doctrine/PHPUnit extensions, PHP-CS-Fixer (`@Symfony`) |
 
 ---
@@ -84,6 +85,9 @@ ddev exec bin/console doctrine:migrations:migrate --no-interaction
 # 6. Create the test database (Doctrine appends the _test suffix automatically)
 ddev exec bin/console doctrine:database:create --env=test --if-not-exists
 ddev exec bin/console doctrine:migrations:migrate --env=test --no-interaction
+
+# 7. Optional: fill the dev database with realistic test data
+ddev composer fixtures
 ```
 
 The API now runs at **https://api-platform.ddev.site/api**.
@@ -103,10 +107,42 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 | `CORS_ALLOW_ORIGIN`  | Regex of allowed origins for browser clients                     |
 | `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
+### Test data
+
+`ddev composer fixtures` fills the dev database with a realistic Dutch webshop in about 4 seconds:
+
+| What        | Amount | Details                                                                  |
+|-------------|--------|--------------------------------------------------------------------------|
+| Accounts    | 2      | `admin@example.com` (admin) and `klant@example.com` (customer)           |
+| Customers   | 50     | Dutch names; the email matches the name (`floris.devries123@gmail.com`)  |
+| Products    | 200    | E.g. "Hoodie Utrecht, marineblauw"; prices ending in ,95; ~10% inactive  |
+| Orders      | ~460   | 1–5 lines each, spread over the last year, never before registration     |
+
+**Every account's password is `password`.** Log in as `klant@example.com` to see a customer with
+order history, or as `admin@example.com` to manage the catalog.
+
+> ⚠️ The command **empties the dev database first** and rebuilds the schema from the migrations.
+> Use `bin/console foundry:load-fixtures --append` to add data without resetting.
+
+How it works:
+
+- **Factories** in `src/Factory/` describe one entity each with realistic defaults (Faker, `nl_NL`).
+  Anything can be overridden per call: `ProductFactory::createOne(['stock' => 0])`.
+- **`OrderFactory` goes through `Order::place()`**, so generated orders obey the same business rules
+  as real ones: stock is reserved, prices are snapshotted and totals add up. The story only orders
+  products that are active and in stock, so stock levels reflect a year of sales.
+- **`src/Story/AppStory.php`** (`#[AsFixture(name: 'main')]`) combines the factories into the full
+  data set.
+- **Reproducible:** the script sets `FOUNDRY_FAKER_SEED=1234`, so every developer gets exactly the
+  same data. Run `bin/console foundry:load-fixtures` without the seed for a different data set.
+
+Foundry is a dev dependency: the bundle is only enabled in the `dev` and `test` environments.
+
 ### Creating an administrator
 
-There is no endpoint for assigning roles (yet). Register a regular customer and then give it
-the `ROLE_ADMIN` role:
+With the fixtures loaded, `admin@example.com` is an administrator already. On a database without
+fixtures there is no endpoint for assigning roles (yet): register a regular customer and then give
+it the `ROLE_ADMIN` role:
 
 ```bash
 ddev exec bin/console dbal:run-sql \
@@ -352,6 +388,7 @@ ddev composer cs        # check code style (PHP-CS-Fixer, dry run with diff)
 ddev composer cs:fix    # fix code style automatically
 ddev composer phpstan   # static analysis (level 5)
 ddev composer test      # PHPUnit
+ddev composer fixtures  # reset the dev database and load the test data
 ```
 
 ### Tests
@@ -365,7 +402,10 @@ ddev composer test      # PHPUnit
 | `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization       |
 
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
-tables before every test. Shared fixtures and login helpers live in `tests/Api/WebshopTestTrait.php`.
+tables before every test. They create their data with the same Foundry factories as the dev
+fixtures. `tests/Api/WebshopTestTrait.php` wraps them so each test pins down exactly what it relies on
+(SKU, price, stock, active) and leaves the rest random. The login helpers live there too.
+Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 
 ### Static analysis
 
@@ -389,9 +429,11 @@ tables before every test. Shared fixtures and login helpers live in `tests/Api/W
 │   │   └── Embeddable/      Value objects (Money)
 │   ├── Enum/                Backed enums (OrderStatus)
 │   ├── Exception/           Domain exceptions
+│   ├── Factory/             Foundry factories for test data (dev/test only)
 │   ├── Ordering/            Use case: PlaceOrder command and handler
 │   ├── Repository/          Repository interfaces and Doctrine implementations
-│   └── State/               API Platform state providers and processors
+│   ├── State/               API Platform state providers and processors
+│   └── Story/               Foundry story with the full dev data set
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
 │   └── Unit/                Domain unit tests
@@ -429,7 +471,12 @@ tables before every test. Shared fixtures and login helpers live in `tests/Api/W
   An idempotency-key header would solve this.
 - **Order lifecycle:** `OrderStatus` currently only knows `placed`. Paid, shipped and cancelled
   (with stock returned) are still to come, for example with the Symfony Workflow component.
-- **Administration:** there is no endpoint or console command to create administrators.
+- **Administration:** there is no endpoint or console command to create administrators (the
+  fixtures provide `admin@example.com` for development).
+- **Tests use TRUNCATE:** Foundry's `ResetDatabase` trait would rebuild the whole database before
+  every test without `dama/doctrine-test-bundle`. That bundle's recipe is in `recipes-contrib`,
+  which this project doesn't allow (`allow-contrib: false`). Enabling it would make the test
+  isolation transactional and faster.
 - **Catalog:** inactive products still show up in the public list, although they can't be ordered.
 - **Notifications:** an order confirmation email, sent asynchronously via Symfony Messenger and Mailer.
 - **Concurrency test:** the locking is designed for concurrent orders, but there is no test yet

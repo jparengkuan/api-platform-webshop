@@ -6,18 +6,17 @@ use ApiPlatform\Test\Client;
 use App\Entity\Customer;
 use App\Entity\Embeddable\Money;
 use App\Entity\Product;
+use App\Factory\CustomerFactory;
+use App\Factory\ProductFactory;
 use Doctrine\ORM\EntityManagerInterface;
-use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
 /**
- * Fixtures and auth helpers shared by the webshop API tests.
+ * Fixtures (built with the Foundry factories) and auth helpers shared by the webshop API tests.
  *
  * @property Client $client
  */
 trait WebshopTestTrait
 {
-    private const string PASSWORD = 'S3cure-webshop-pass!';
-
     /**
      * Empties all webshop tables so every test starts from a known state.
      */
@@ -35,43 +34,26 @@ trait WebshopTestTrait
     }
 
     /**
-     * Creates a customer with the shared test password.
+     * Creates a customer; everything a test does not pin down gets a realistic random value.
      *
      * @param list<string> $roles
      */
     private function createCustomer(string $email, array $roles = []): Customer
     {
-        $customer = new Customer()
-            ->setEmail($email)
-            ->setFirstName('Jan')
-            ->setLastName('Jansen')
-            ->setRoles($roles);
-        $customer->setPassword(self::getContainer()->get(UserPasswordHasherInterface::class)->hashPassword($customer, self::PASSWORD));
-
-        $em = $this->entityManager();
-        $em->persist($customer);
-        $em->flush();
-
-        return $customer;
+        return CustomerFactory::createOne(['email' => $email, 'roles' => $roles]);
     }
 
     /**
-     * Creates a product directly in the database.
+     * Creates a product with the given SKU, price, stock and sale status pinned down.
      */
     private function createProduct(string $sku, int $amount, int $stock, string $currency = 'EUR', bool $active = true): Product
     {
-        $product = new Product()
-            ->setSku($sku)
-            ->setName('Product '.$sku)
-            ->setPrice(new Money($amount, $currency))
-            ->setStock($stock)
-            ->setActive($active);
-
-        $em = $this->entityManager();
-        $em->persist($product);
-        $em->flush();
-
-        return $product;
+        return ProductFactory::createOne([
+            'sku' => $sku,
+            'price' => new Money($amount, $currency),
+            'stock' => $stock,
+            'active' => $active,
+        ]);
     }
 
     /**
@@ -90,7 +72,7 @@ trait WebshopTestTrait
      */
     private function login(string $email): string
     {
-        $response = $this->client->request('POST', '/api/login', ['json' => ['email' => $email, 'password' => self::PASSWORD]]);
+        $response = $this->client->request('POST', '/api/login', ['json' => ['email' => $email, 'password' => CustomerFactory::PASSWORD]]);
         self::assertResponseIsSuccessful();
 
         return $response->toArray()['token'];
