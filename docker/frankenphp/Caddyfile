@@ -9,9 +9,10 @@
 	}
 }
 
-# SERVER_NAME is the public domain (Caddy then fetches a Let's Encrypt certificate automatically),
-# or ":80" to serve plain HTTP, e.g. behind a load balancer that terminates TLS.
-{$SERVER_NAME:localhost} {
+# Default ":80": plain HTTP behind Varnish (compose.prod.yaml), with TLS terminated further out.
+# Set SERVER_NAME to a domain only when running this image on its own, directly on the internet;
+# Caddy then fetches a Let's Encrypt certificate automatically.
+{$SERVER_NAME::80} {
 	root /app/public
 	encode zstd br gzip
 

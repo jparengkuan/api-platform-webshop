@@ -11,6 +11,7 @@ use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Patch;
 use ApiPlatform\Metadata\Post;
 use ApiPlatform\Metadata\QueryParameter;
+use App\ApiResource\CacheHeaders;
 use App\Entity\Embeddable\Money;
 use App\Exception\InsufficientStockException;
 use App\Exception\InvalidMoneyException;
@@ -29,6 +30,7 @@ use Symfony\Component\Validator\Constraints as Assert;
 #[ApiResource(
     operations: [
         new GetCollection(
+            cacheHeaders: CacheHeaders::PUBLIC_CATALOG,
             parameters: [
                 // ?category=/api/categories/{id}
                 'category' => new QueryParameter(filter: new IriFilter(), property: 'category', description: 'Only products in this category (IRI).'),
@@ -36,7 +38,7 @@ use Symfony\Component\Validator\Constraints as Assert;
                 'category.slug' => new QueryParameter(filter: new ExactFilter(), property: 'category.slug', description: 'Only products in the category with this slug.'),
             ],
         ),
-        new Get(),
+        new Get(cacheHeaders: CacheHeaders::PUBLIC_CATALOG),
         new Post(security: "is_granted('ROLE_ADMIN')"),
         new Patch(
             security: "is_granted('ROLE_ADMIN')",

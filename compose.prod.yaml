@@ -1,4 +1,8 @@
-# Production stack: the app (FrankenPHP) and PostgreSQL.
+# Production stack:  reverse proxy (TLS)  →  varnish :80  →  php :80  →  database
+#
+# Runs behind the hosting platform's reverse proxy (e.g. Coolify), which terminates TLS and
+# forwards the domain to the "varnish" service on port 80. Nothing is exposed publicly by
+# this file; for testing on the machine itself Varnish listens on 127.0.0.1:${HTTP_PORT}.
 #
 #   cp .env.prod.local.dist .env.prod.local   # then fill in real secrets
 #   docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build
@@ -6,6 +10,24 @@
 # Standalone on purpose: compose.yaml/compose.override.yaml belong to the Doctrine recipe.
 
 services:
+  varnish:
+    build:
+      context: docker/varnish
+    image: ${IMAGE_NAME:-api-platform-webshop}-varnish:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      VARNISH_SIZE: ${VARNISH_SIZE:-256M}
+    ports:
+      - 127.0.0.1:${HTTP_PORT:-8080}:80
+    healthcheck:
+      test: ['CMD-SHELL', 'varnishadm ping >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      php:
+        condition: service_healthy
+
   php:
     build:
       context: .
@@ -16,20 +38,17 @@ services:
     image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      SERVER_NAME: ${SERVER_NAME:?Set SERVER_NAME to your domain, or ":80" for plain HTTP}
+      # Plain HTTP: TLS is terminated by the reverse proxy in front of Varnish.
+      SERVER_NAME: ':80'
       APP_SECRET: ${APP_SECRET:?Set APP_SECRET}
       DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-app}?serverVersion=17&charset=utf8
       JWT_PASSPHRASE: ${JWT_PASSPHRASE:?Set JWT_PASSPHRASE}
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-^https?://localhost(:[0-9]+)?$}
+      # Where API Platform sends BAN requests to invalidate cached responses.
+      VARNISH_URL: http://varnish
       # Staging/test only: replace all data with the demo fixtures on every start.
       RESET_DEMO_DATA: ${RESET_DEMO_DATA:-0}
-    ports:
-      - ${HTTP_PORT:-80}:80
-      - ${HTTPS_PORT:-443}:443
-      - ${HTTPS_PORT:-443}:443/udp
     volumes:
-      - caddy_data:/data
-      - caddy_config:/config
       - jwt_keys:/app/config/jwt
     depends_on:
       database:
@@ -52,7 +71,5 @@ services:
       start_period: 30s
 
 volumes:
-  caddy_data:
-  caddy_config:
   database_data:
   jwt_keys:

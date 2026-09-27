@@ -48,6 +48,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Database         | PostgreSQL 17 via Doctrine ORM 3 and Doctrine Migrations         |
 | Authentication   | LexikJWTAuthenticationBundle (stateless, `Bearer` token)         |
 | Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17)      |
+| Production       | Docker: FrankenPHP (worker mode) behind Varnish 8, with tag-based cache invalidation |
 | Tests            | PHPUnit 13, `api-platform/test`                                  |
 | Test data        | Foundry (`zenstruck/foundry`) factories and stories with Faker (`nl_NL`) |
 | Quality          | PHPStan (level 5) with Symfony/Doctrine/PHPUnit extensions, PHP-CS-Fixer (`@Symfony`) |
@@ -440,6 +441,7 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, login, access to profiles                    |
 | `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, category filters, admin management, validation, JSON schema |
 | `tests/Api/CategoryTest`       | Functional (HTTP)       | Public list, slugs, uniqueness, admin-only, delete protection |
+| `tests/Api/HttpCacheTest`      | Functional (HTTP)       | Cache headers, cache tags, invalidation on changes and orders |
 | `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization       |
 
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
@@ -459,28 +461,71 @@ Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 
 ## Deployment (Docker)
 
-DDEV is for development only. For servers there is a production image based on
-[FrankenPHP](https://frankenphp.dev): PHP and the Caddy web server in one container, with automatic
-HTTPS (Let's Encrypt) and **worker mode** (the Symfony kernel stays in memory between requests,
-responses take a few milliseconds).
+DDEV is for development only. For servers there is a production stack in `compose.prod.yaml`:
+
+```
+reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
+  e.g. Coolify           HTTP cache       Symfony app
+```
+
+- **FrankenPHP** runs PHP and the Caddy web server in one container, in **worker mode**: the
+  Symfony kernel stays in memory between requests, so responses take a few milliseconds.
+- **Varnish** caches public responses (see [HTTP caching](#http-caching-varnish)).
+- **TLS** is terminated by the hosting platform's reverse proxy in front of Varnish (Coolify
+  does this automatically, with Let's Encrypt). The stack itself only speaks HTTP and publishes no
+  public ports.
 
 ### Run it
 
 ```bash
 cp .env.prod.local.dist .env.prod.local     # fill in real values; the copy is git-ignored
-docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build
+docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build --wait
+curl http://127.0.0.1:8080/api/products     # through Varnish, from the server itself
 ```
 
-| Variable            | Meaning                                                                  |
-|---------------------|--------------------------------------------------------------------------|
-| `SERVER_NAME`       | Public domain, e.g. `api.example.com` (HTTPS certificate is automatic); `:80` for plain HTTP behind a proxy |
-| `APP_SECRET`        | Symfony secret, e.g. `openssl rand -hex 32`                              |
-| `JWT_PASSPHRASE`    | Protects the JWT private key, e.g. `openssl rand -hex 32`                 |
-| `POSTGRES_PASSWORD` | Database password                                                        |
-| `CORS_ALLOW_ORIGIN` | Regex of your frontend's origin(s)                                       |
-| `HTTP_PORT` / `HTTPS_PORT` | Host ports (default 80/443)                                       |
+| Variable                   | Meaning                                                               |
+|----------------------------|-----------------------------------------------------------------------|
+| `APP_SECRET`               | Symfony secret, e.g. `openssl rand -hex 32`                           |
+| `JWT_PASSPHRASE`           | Protects the JWT private key, e.g. `openssl rand -hex 32`              |
+| `POSTGRES_PASSWORD`        | Database password (`POSTGRES_DB`/`POSTGRES_USER` default to `app`)    |
+| `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
+| `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
+| `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |
 | `INSTALL_DEV_DEPENDENCIES` | Build argument; `1` for staging (adds Foundry for the demo data), `0` (default) for production |
-| `RESET_DEMO_DATA`   | Staging only: `1` replaces all data with the demo fixtures on every start. Refuses to run on a production image. |
+| `RESET_DEMO_DATA`          | Staging only: `1` replaces all data with the demo fixtures on every start. Refuses to run on a production image. |
+
+### HTTP caching (Varnish)
+
+Public catalog responses (`GET` on products and categories) are cached by Varnish for an hour and
+by browsers for a minute (`CacheHeaders::PUBLIC_CATALOG`). They never go stale in Varnish:
+
+1. Every response carries a `Cache-Tags` header with the IRIs of all resources in it
+   (e.g. `/api/products/0199…,/api/categories/0199…,/api/products`).
+2. When a resource changes through Doctrine (an admin edits a price, an order lowers the stock, a
+   category is added), API Platform sends Varnish a `BAN` request for the affected IRIs.
+3. Varnish drops exactly the responses tagged with them; the next request fetches fresh data.
+
+| Request                                  | Cached by Varnish? |
+|------------------------------------------|--------------------|
+| `GET /api/products`, `/api/categories`, … without `Authorization` | ✅ Yes, until a ban |
+| Anything with an `Authorization` header or cookies (`/api/me`, `/api/orders`, logged-in catalog requests) | ❌ Always passed to the app |
+| `POST`, `PATCH`, `DELETE`                | ❌ Never            |
+
+Details in `docker/varnish/default.vcl`:
+
+- `X-Cache: HIT|MISS` on every response shows what happened.
+- Conditional requests with `If-None-Match` get a `304 Not Modified` straight from Varnish.
+- If the app is down, Varnish keeps serving cached responses for up to an hour (grace mode).
+- `BAN` is only accepted from the private network **and** for the internal host name `varnish`, so
+  it can't be triggered through the public domain. The `Cache-Tags` header is removed before
+  responses leave Varnish.
+
+> Tip for a frontend: load the public catalog **without** the `Authorization` header, so it comes
+> from the cache; send the token only for personal endpoints.
+
+In tests, `App\Tests\Support\RecordingPurger` replaces the Varnish purger, and
+`tests/Api/HttpCacheTest.php` checks the cache headers, the tags and which resources each change
+invalidates.
 
 ### Staging
 
@@ -489,20 +534,26 @@ tests pass: the `deploy-staging` job in `.github/workflows/ci.yml` calls the dep
 hosting platform (Coolify). It needs two repository secrets, `COOLIFY_STAGING_WEBHOOK` and
 `COOLIFY_TOKEN`; without them the job skips itself with a notice.
 
-Staging runs the production image built with `INSTALL_DEV_DEPENDENCIES=1` and started with
+Staging runs the same stack, built with `INSTALL_DEV_DEPENDENCIES=1` and started with
 `RESET_DEMO_DATA=1`, so every deployment starts with the same fresh demo data (`admin@example.com`
 and `klant@example.com`, password `password`). Never reuse staging secrets or its database for
 production.
 
 ### What happens on start
 
-The entrypoint (`docker/frankenphp/docker-entrypoint.sh`) runs before the web server starts:
+The entrypoint of the app container (`docker/frankenphp/docker-entrypoint.sh`) runs before the web
+server starts:
 
 1. Generates the JWT key pair on the first start (stored in the `jwt_keys` volume, reused afterwards).
 2. Waits until PostgreSQL accepts connections.
-3. Runs the migrations (`--all-or-nothing`: a failing migration changes nothing).
+3. With `RESET_DEMO_DATA=1` only: drops all tables.
+4. Runs the migrations (`--all-or-nothing`: a failing migration changes nothing).
+5. With `RESET_DEMO_DATA=1` only: loads the demo fixtures.
 
-### The image
+Compose starts the services in order and waits for each health check: PostgreSQL, then the app,
+then Varnish.
+
+### The images
 
 | Choice                                  | Why                                                                   |
 |-----------------------------------------|-----------------------------------------------------------------------|
@@ -511,10 +562,11 @@ The entrypoint (`docker/frankenphp/docker-entrypoint.sh`) runs before the web se
 | Runs as the unprivileged user `app`     | A compromised process has no root in the container                     |
 | OPcache without timestamp checks        | Code never changes in a running container                              |
 | `.dockerignore` excludes `.env.*.local`, `config/jwt/*.pem`, `.git`, tests | Secrets and dev files never end up in the image |
-| `HEALTHCHECK` on Caddy's admin endpoint | Docker (and orchestrators) see when the app is unhealthy               |
+| Health checks on the app (Caddy admin endpoint) and Varnish (`varnishadm ping`) | Docker and the platform see when a container is unhealthy |
+| VCL baked into the Varnish image (`docker/varnish/Dockerfile`) | Deploying needs no bind mounts            |
 
-Data lives in named volumes: `database_data` (PostgreSQL), `jwt_keys`, and `caddy_data` (TLS
-certificates). **Back up `database_data`** (e.g. a daily `pg_dump`); the rest can be regenerated.
+Data lives in two named volumes: `database_data` (PostgreSQL) and `jwt_keys`. **Back up
+`database_data`** (e.g. a daily `pg_dump`); the JWT keys are regenerated if lost (users log in again).
 
 Run a console command in production:
 
@@ -529,9 +581,13 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 ```
 ├── .github/                 CI workflow and the shared PHP setup action
 ├── config/                  Symfony configuration (packages, routes, services)
-├── docker/                  Production image config (Caddyfile, entrypoint, php.ini)
+├── docker/
+│   ├── frankenphp/          Caddyfile and entrypoint of the app image
+│   ├── php/                 Production php.ini
+│   └── varnish/             VCL and image of the HTTP cache
 ├── migrations/              Doctrine migrations (never change the schema by hand)
 ├── src/
+│   ├── ApiResource/         Shared API settings (HTTP cache headers)
 │   ├── Controller/          LoginController (route for the json_login firewall)
 │   ├── Doctrine/            API Platform query extensions
 │   ├── Dto/                 API input DTOs
@@ -546,9 +602,10 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 │   └── Story/               Foundry story with the full dev data set
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
+│   ├── Support/             Test doubles (RecordingPurger)
 │   └── Unit/                Domain unit tests
 ├── Dockerfile               Production image (FrankenPHP, worker mode)
-├── compose.prod.yaml        Production stack: app + PostgreSQL
+├── compose.prod.yaml        Production stack: Varnish + app + PostgreSQL
 ├── .php-cs-fixer.dist.php   Code style (@Symfony)
 ├── phpstan.dist.neon        Static analysis (level 5)
 └── phpunit.dist.xml         PHPUnit configuration

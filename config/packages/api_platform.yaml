@@ -9,3 +9,20 @@ api_platform:
         stateless: true
         cache_headers:
             vary: ['Content-Type', 'Authorization', 'Origin']
+
+# Varnish caches public responses; on every change made through Doctrine, API Platform bans the
+# cached responses that contain the changed resources (tagged with their IRIs).
+when@prod:
+    api_platform:
+        http_cache:
+            invalidation:
+                enabled: true
+                urls: ['%env(VARNISH_URL)%']
+
+# Tests record the invalidations instead of sending them to a Varnish server.
+when@test:
+    api_platform:
+        http_cache:
+            invalidation:
+                enabled: true
+                purger: App\Tests\Support\RecordingPurger

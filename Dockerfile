@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Production image: FrankenPHP (Caddy + PHP) serving the Symfony app in worker mode.
+# In compose.prod.yaml it runs behind Varnish (docker/varnish) on plain HTTP port 80.
 # Local development uses DDEV; this image is for servers. See README > Deployment.
 
 FROM dunglas/frankenphp:1-php8.4 AS base
@@ -60,6 +61,7 @@ RUN set -eux; \
 	composer dump-env prod; \
 	composer run-script $noDev post-install-cmd
 
+# 80 behind Varnish; 443 only when the image serves a domain on its own (SERVER_NAME=domain).
 EXPOSE 80 443 443/udp
 
 HEALTHCHECK --start-period=60s --interval=30s --timeout=5s --retries=3 \

@@ -9,6 +9,7 @@ use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Patch;
 use ApiPlatform\Metadata\Post;
+use App\ApiResource\CacheHeaders;
 use App\Exception\CategoryInUseException;
 use App\Repository\CategoryRepository;
 use App\State\CategoryRemoveProcessor;
@@ -28,8 +29,8 @@ use Symfony\Component\Validator\Constraints as Assert;
 #[UniqueEntity(fields: ['slug'], message: 'A category with this slug already exists.')]
 #[ApiResource(
     operations: [
-        new GetCollection(),
-        new Get(),
+        new GetCollection(cacheHeaders: CacheHeaders::PUBLIC_CATALOG),
+        new Get(cacheHeaders: CacheHeaders::PUBLIC_CATALOG),
         new Post(security: "is_granted('ROLE_ADMIN')"),
         new Patch(security: "is_granted('ROLE_ADMIN')"),
         new Delete(
