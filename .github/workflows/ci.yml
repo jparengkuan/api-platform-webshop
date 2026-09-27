@@ -119,3 +119,27 @@ jobs:
           annotate_only: true
           detailed_summary: true
           include_passed: false
+
+  deploy-staging:
+    name: Deploy to staging
+    # Only after all checks passed, and only for pushes to develop (not for pull requests).
+    needs: [code-style, static-analysis, tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    # Never cancel a deployment halfway because a newer commit arrived.
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    steps:
+      - name: Trigger the Coolify deployment
+        env:
+          WEBHOOK: ${{ secrets.COOLIFY_STAGING_WEBHOOK }}
+          TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$WEBHOOK" ] || [ -z "$TOKEN" ]; then
+            echo '::notice title=Staging deploy skipped::Set the COOLIFY_STAGING_WEBHOOK and COOLIFY_TOKEN repository secrets to enable it (see README > Deployment > Staging).'
+            exit 0
+          fi
+          curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$WEBHOOK"
+          echo '### 🚀 Staging deployment triggered' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Coolify is building the new version; follow it under Deployments in Coolify.' >> "$GITHUB_STEP_SUMMARY"

@@ -22,6 +22,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 - [Error handling](#error-handling)
 - [Security](#security)
 - [Quality and tests](#quality-and-tests)
+- [Deployment (Docker)](#deployment-docker)
 - [Project structure](#project-structure)
 - [Conventions](#conventions)
 - [Known limitations and roadmap](#known-limitations-and-roadmap)
@@ -435,11 +436,79 @@ Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 
 ---
 
+## Deployment (Docker)
+
+DDEV is for development only. For servers there is a production image based on
+[FrankenPHP](https://frankenphp.dev): PHP and the Caddy web server in one container, with automatic
+HTTPS (Let's Encrypt) and **worker mode** (the Symfony kernel stays in memory between requests,
+responses take a few milliseconds).
+
+### Run it
+
+```bash
+cp .env.prod.local.dist .env.prod.local     # fill in real values; the copy is git-ignored
+docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build
+```
+
+| Variable            | Meaning                                                                  |
+|---------------------|--------------------------------------------------------------------------|
+| `SERVER_NAME`       | Public domain, e.g. `api.example.com` (HTTPS certificate is automatic); `:80` for plain HTTP behind a proxy |
+| `APP_SECRET`        | Symfony secret, e.g. `openssl rand -hex 32`                              |
+| `JWT_PASSPHRASE`    | Protects the JWT private key, e.g. `openssl rand -hex 32`                 |
+| `POSTGRES_PASSWORD` | Database password                                                        |
+| `CORS_ALLOW_ORIGIN` | Regex of your frontend's origin(s)                                       |
+| `HTTP_PORT` / `HTTPS_PORT` | Host ports (default 80/443)                                       |
+| `INSTALL_DEV_DEPENDENCIES` | Build argument; `1` for staging (adds Foundry for the demo data), `0` (default) for production |
+| `RESET_DEMO_DATA`   | Staging only: `1` replaces all data with the demo fixtures on every start. Refuses to run on a production image. |
+
+### Staging
+
+Every push to `develop` is deployed to a staging environment, **after** code style, PHPStan and the
+tests pass: the `deploy-staging` job in `.github/workflows/ci.yml` calls the deploy webhook of the
+hosting platform (Coolify). It needs two repository secrets, `COOLIFY_STAGING_WEBHOOK` and
+`COOLIFY_TOKEN`; without them the job skips itself with a notice.
+
+Staging runs the production image built with `INSTALL_DEV_DEPENDENCIES=1` and started with
+`RESET_DEMO_DATA=1`, so every deployment starts with the same fresh demo data (`admin@example.com`
+and `klant@example.com`, password `password`). Never reuse staging secrets or its database for
+production.
+
+### What happens on start
+
+The entrypoint (`docker/frankenphp/docker-entrypoint.sh`) runs before the web server starts:
+
+1. Generates the JWT key pair on the first start (stored in the `jwt_keys` volume, reused afterwards).
+2. Waits until PostgreSQL accepts connections.
+3. Runs the migrations (`--all-or-nothing`: a failing migration changes nothing).
+
+### The image
+
+| Choice                                  | Why                                                                   |
+|-----------------------------------------|-----------------------------------------------------------------------|
+| `composer install --no-dev`             | No Foundry, PHPStan, PHPUnit or tests in production                    |
+| `composer dump-env prod`                | `.env` compiled to PHP; real values come from environment variables    |
+| Runs as the unprivileged user `app`     | A compromised process has no root in the container                     |
+| OPcache without timestamp checks        | Code never changes in a running container                              |
+| `.dockerignore` excludes `.env.*.local`, `config/jwt/*.pem`, `.git`, tests | Secrets and dev files never end up in the image |
+| `HEALTHCHECK` on Caddy's admin endpoint | Docker (and orchestrators) see when the app is unhealthy               |
+
+Data lives in named volumes: `database_data` (PostgreSQL), `jwt_keys`, and `caddy_data` (TLS
+certificates). **Back up `database_data`** (e.g. a daily `pg_dump`); the rest can be regenerated.
+
+Run a console command in production:
+
+```bash
+docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/console about
+```
+
+---
+
 ## Project structure
 
 ```
 ├── .github/                 CI workflow and the shared PHP setup action
 ├── config/                  Symfony configuration (packages, routes, services)
+├── docker/                  Production image config (Caddyfile, entrypoint, php.ini)
 ├── migrations/              Doctrine migrations (never change the schema by hand)
 ├── src/
 │   ├── Controller/          LoginController (route for the json_login firewall)
@@ -457,6 +526,8 @@ Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
 │   └── Unit/                Domain unit tests
+├── Dockerfile               Production image (FrankenPHP, worker mode)
+├── compose.prod.yaml        Production stack: app + PostgreSQL
 ├── .php-cs-fixer.dist.php   Code style (@Symfony)
 ├── phpstan.dist.neon        Static analysis (level 5)
 └── phpunit.dist.xml         PHPUnit configuration

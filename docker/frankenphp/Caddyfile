@@ -1,0 +1,30 @@
+# https://frankenphp.dev/docs/config
+{
+	skip_install_trust
+
+	{$CADDY_GLOBAL_OPTIONS}
+
+	frankenphp {
+		{$FRANKENPHP_CONFIG}
+	}
+}
+
+# SERVER_NAME is the public domain (Caddy then fetches a Let's Encrypt certificate automatically),
+# or ":80" to serve plain HTTP, e.g. behind a load balancer that terminates TLS.
+{$SERVER_NAME:localhost} {
+	root /app/public
+	encode zstd br gzip
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	php_server {
+		worker {
+			file /app/public/index.php
+			env FRANKENPHP_WORKER 1
+		}
+	}
+}

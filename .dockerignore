@@ -1,0 +1,35 @@
+# Only what the production image needs goes into the build context.
+
+# Secrets and local configuration: passed as environment variables at runtime instead.
+.env.*.local
+.env.*.dist
+.env.local
+.env.local.php
+.env.dev
+.env.test
+config/jwt/*.pem
+config/secrets/prod/prod.decrypt.private.php
+
+# Generated or installed inside the image
+var/
+vendor/
+public/bundles/
+
+# Development, CI and tooling
+.git/
+.github/
+.ddev/
+.idea/
+.vscode/
+tests/
+.php-cs-fixer.cache
+.php-cs-fixer.dist.php
+.phpunit.cache/
+phpstan.dist.neon
+phpunit.dist.xml
+compose*.yaml
+Dockerfile
+.dockerignore
+*.md
+AGENTS.md
+CLAUDE.md

@@ -8,9 +8,10 @@
 *.swp
 *~
 
-# Local assistant instruction files
+# Local-only files (assistant instructions, personal deployment notes)
 /AGENTS.md
 /CLAUDE.md
+/DEPLOY.md
 
 # Operating system files
 .DS_Store
