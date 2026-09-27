@@ -1,0 +1,35 @@
+name: Set up PHP project
+description: Installs PHP with the project's extensions and the Composer dependencies (cached).
+
+inputs:
+  tools:
+    description: Extra tools for shivammathur/setup-php, e.g. "cs2pr".
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.4'
+        extensions: ctype, iconv, intl, pdo_pgsql
+        tools: composer, ${{ inputs.tools }}
+        coverage: none
+
+    - name: Locate Composer cache
+      id: composer-cache
+      shell: bash
+      run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Composer packages
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.composer-cache.outputs.dir }}
+        key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+        restore-keys: composer-${{ runner.os }}-
+
+    - name: Install dependencies
+      shell: bash
+      run: composer install --no-interaction --no-progress --prefer-dist

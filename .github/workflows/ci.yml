@@ -1,0 +1,121 @@
+name: CI
+
+# Runs on every push to every branch (master, develop, feature branches) and on every pull request.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run that is still going.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # "-o pipefail": a failing command in a pipe fails the step.
+    shell: bash
+
+jobs:
+  code-style:
+    name: Code style (PHP-CS-Fixer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-php
+        with:
+          tools: cs2pr
+
+      # Violations appear as annotations on the offending lines (Files changed tab and job summary).
+      - name: Check code style
+        run: vendor/bin/php-cs-fixer fix --dry-run --format=checkstyle | cs2pr
+
+      - name: Show the fixes as a diff
+        if: failure()
+        run: |
+          vendor/bin/php-cs-fixer fix --dry-run --diff || true
+          {
+            echo '### ❌ Code style violations'
+            echo 'Fix them locally with `ddev composer cs:fix` and commit the result.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  static-analysis:
+    name: Static analysis (PHPStan level 5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-php
+
+      # PHPStan's Symfony extension reads the compiled dev container.
+      - name: Build the container
+        run: bin/console cache:warmup --env=dev
+
+      # Errors appear as annotations on the offending lines.
+      - name: Run PHPStan
+        run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G --error-format=github
+
+      - name: Show the errors as a table
+        if: failure()
+        run: |
+          vendor/bin/phpstan analyse --no-progress --memory-limit=1G --error-format=table || true
+          {
+            echo '### ❌ PHPStan found errors'
+            echo 'Reproduce locally with `ddev composer phpstan`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tests:
+    name: Tests (PHPUnit)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_ENV: test
+      # Doctrine appends "_test" to the database name in the test environment.
+      DATABASE_URL: postgresql://app:app@127.0.0.1:5432/app?serverVersion=17&charset=utf8
+      # Throwaway key pair generated below; this passphrase protects nothing outside this job.
+      JWT_PASSPHRASE: ci-only-passphrase
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-php
+
+      - name: Generate JWT key pair
+        run: bin/console lexik:jwt:generate-keypair --no-interaction
+
+      - name: Create the test database
+        run: |
+          bin/console doctrine:database:create --if-not-exists
+          bin/console doctrine:migrations:migrate --no-interaction
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit --log-junit var/phpunit/junit.xml
+
+      # Failed tests appear as annotations on the failing assertion and in the job summary.
+      - name: Report test results
+        if: always()
+        uses: mikepenz/action-junit-report@v6
+        with:
+          report_paths: var/phpunit/junit.xml
+          annotate_only: true
+          detailed_summary: true
+          include_passed: false

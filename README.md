@@ -1,5 +1,7 @@
 # Webshop API
 
+[![CI](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml)
+
 A REST/JSON-LD API for a simple webshop, built with **Symfony 8.1** and **API Platform 5**.
 Customers can register, log in with a JWT, browse the catalog and place an order.
 Administrators maintain the product catalog.
@@ -391,6 +393,23 @@ ddev composer test      # PHPUnit
 ddev composer fixtures  # reset the dev database and load the test data
 ```
 
+### Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on **every push to every branch** and on every
+pull request. Three jobs run in parallel and must all pass:
+
+| Job                                  | Runs                                           | Where errors show up                         |
+|--------------------------------------|------------------------------------------------|----------------------------------------------|
+| **Code style (PHP-CS-Fixer)**        | `php-cs-fixer fix --dry-run`                   | Annotations on the lines + a diff in the log |
+| **Static analysis (PHPStan level 5)**| `phpstan analyse`                              | Annotations on the lines + a table in the log|
+| **Tests (PHPUnit)**                  | Full suite against PostgreSQL 17               | Annotations on the failing assertion + a list in the job summary |
+
+Annotations appear in the **Files changed** tab of a pull request and in the **Summary** of the
+workflow run, so you rarely need to dig through the logs. Every failure also writes the command
+to reproduce it locally into the job summary.
+
+The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
+
 ### Tests
 
 | Suite                          | Type                    | What is tested                                             |
@@ -419,6 +438,7 @@ Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 ## Project structure
 
 ```
+├── .github/                 CI workflow and the shared PHP setup action
 ├── config/                  Symfony configuration (packages, routes, services)
 ├── migrations/              Doctrine migrations (never change the schema by hand)
 ├── src/
