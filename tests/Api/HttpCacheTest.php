@@ -4,7 +4,7 @@ namespace App\Tests\Api;
 
 use ApiPlatform\Test\ApiTestCase;
 use ApiPlatform\Test\Client;
-use App\Factory\CategoryFactory;
+use App\Catalog\Infrastructure\Foundry\CategoryFactory;
 use App\Tests\Support\RecordingPurger;
 
 /**

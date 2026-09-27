@@ -27,10 +27,19 @@ def declare_topology(channel: BlockingChannel) -> None:
     channel.queue_bind(INVOICE_GENERATED_QUEUE, EXCHANGE, routing_key=INVOICE_GENERATED)
 
 
+InvoiceRenderer = Callable[[OrderPlaced], bytes]
+"""Strategy that turns an order into an invoice document, e.g. render_invoice (PDF)."""
+
+
 class OrderPlacedHandler:
     """Handles one delivery: the invoice is published first, then the order event is acknowledged."""
 
-    def __init__(self, now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
+    def __init__(
+        self,
+        render: InvoiceRenderer = render_invoice,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._render = render
         self._now = now
 
     def __call__(
@@ -49,7 +58,7 @@ class OrderPlacedHandler:
             channel.basic_reject(method.delivery_tag, requeue=False)
             return
 
-        payload = invoice_generated(order, render_invoice(order), self._now())
+        payload = invoice_generated(order, self._render(order), self._now())
         # With publisher confirms on, this returns only once RabbitMQ has stored the invoice. If it fails,
         # the exception closes the channel and the unacknowledged OrderPlaced is delivered again.
         channel.basic_publish(

@@ -4,7 +4,7 @@ namespace App\Tests\Api;
 
 use ApiPlatform\Test\ApiTestCase;
 use ApiPlatform\Test\Client;
-use App\Factory\OAuthClientFactory;
+use App\Identity\Infrastructure\Foundry\OAuthClientFactory;
 
 /**
  * Logging in is only possible through the OAuth2 Authorization Code grant with PKCE, by a registered client.

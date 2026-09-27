@@ -3,10 +3,10 @@
 namespace App\Tests\Api;
 
 use ApiPlatform\Test\Client;
-use App\Entity\Category;
-use App\Entity\Product;
-use App\Factory\CustomerFactory;
-use App\Factory\OAuthClientFactory;
+use App\Catalog\Domain\Category;
+use App\Catalog\Domain\Product;
+use App\Customer\Infrastructure\Foundry\CustomerFactory;
+use App\Identity\Infrastructure\Foundry\OAuthClientFactory;
 use App\Tests\Support\DatabaseFixturesTrait;
 
 /**

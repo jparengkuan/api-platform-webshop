@@ -18,6 +18,12 @@ services:
     # this creates a service per class whose id is the fully-qualified class name
     App\:
         resource: '../src/'
+        # Entities, value objects, exceptions and events are data, not services. Ports (interfaces)
+        # are bound to their adapter with #[AsAlias] on the adapter.
+        exclude:
+            - '../src/*/Domain/'
+            - '../src/*/Application/Event/'
+            - '../src/Kernel.php'
 
     # add more service definitions when explicit configuration is needed
     # please note that last definitions always *replace* previous ones

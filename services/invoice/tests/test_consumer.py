@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -30,7 +31,10 @@ def deliver(routing_key: str = "order.placed") -> SimpleNamespace:
     return SimpleNamespace(routing_key=routing_key, delivery_tag=7)
 
 
-handler = OrderPlacedHandler(now=lambda: datetime(2026, 9, 28, 12, 0, tzinfo=UTC))
+handler = OrderPlacedHandler(
+    render=lambda order: b"%PDF-1.3 " + order.order_id.encode(),
+    now=lambda: datetime(2026, 9, 28, 12, 0, tzinfo=UTC),
+)
 
 
 def test_publishes_invoice_generated_then_acknowledges(order_placed_body: bytes) -> None:
@@ -46,7 +50,9 @@ def test_publishes_invoice_generated_then_acknowledges(order_placed_body: bytes)
         True,
     )
     assert payload["invoiceNumber"] == "INV-01a0e480-2c56-7901-8a69-d653265d5d1f"
-    assert payload["pdfBase64"]
+    assert base64.b64decode(payload["pdfBase64"]) == b"%PDF-1.3 01a0e480-2c56-7901-8a69-d653265d5d1f", (
+        "The injected renderer produced the document"
+    )
     assert properties.content_type == "application/json"
     assert properties.message_id == payload["invoiceNumber"]
     assert properties.delivery_mode == 2

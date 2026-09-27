@@ -4,8 +4,8 @@ namespace App\Tests\Api;
 
 use ApiPlatform\Test\ApiTestCase;
 use ApiPlatform\Test\Client;
-use App\Entity\Product;
-use App\Factory\CategoryFactory;
+use App\Catalog\Domain\Product;
+use App\Catalog\Infrastructure\Foundry\CategoryFactory;
 
 final class ProductTest extends ApiTestCase
 {
