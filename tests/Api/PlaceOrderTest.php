@@ -58,6 +58,27 @@ final class PlaceOrderTest extends ApiTestCase
     }
 
     /**
+     * Frontends that send and accept plain JSON (not JSON-LD) can place an order as well.
+     */
+    public function testOrderCanBePlacedWithPlainJson(): void
+    {
+        $this->createCustomer('jan@example.com');
+        $mug = $this->createProduct('MUG-01', 1250, 10);
+
+        $response = $this->client->request('POST', '/api/orders', [
+            'auth_bearer' => $this->login('jan@example.com'),
+            'headers' => ['Content-Type' => 'application/json', 'Accept' => 'application/json'],
+            'body' => json_encode(['lines' => [['product' => $this->iri($mug), 'quantity' => 2]]], \JSON_THROW_ON_ERROR),
+        ]);
+
+        self::assertResponseStatusCodeSame(201);
+        self::assertStringStartsWith('application/json', $response->getHeaders()['content-type'][0]);
+        $order = $response->toArray();
+        self::assertSame(2500, $order['total']['amount']);
+        self::assertArrayNotHasKey('@id', $order);
+    }
+
+    /**
      * Lines for the same product are merged into one line.
      */
     public function testDuplicateLinesAreMerged(): void

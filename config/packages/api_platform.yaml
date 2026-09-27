@@ -1,6 +1,10 @@
 api_platform:
     title: Webshop API
     version: 1.0.0
+    # JSON-LD (Hydra) is the default; plain JSON is accepted too, as most frontends send it.
+    formats:
+        jsonld: ['application/ld+json']
+        json: ['application/json']
     defaults:
         stateless: true
         cache_headers:
