@@ -2,8 +2,8 @@
 
 namespace App\Tests\Support;
 
-use App\Shared\Application\Event\IntegrationEvent;
-use App\Shared\Application\EventPublisherInterface;
+use App\Message\IntegrationEvent;
+use App\Messenger\EventPublisherInterface;
 
 /**
  * Stands in for the event publisher in unit tests: records what would be published.

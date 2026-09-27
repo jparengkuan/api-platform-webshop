@@ -4,8 +4,8 @@ namespace App\Tests\Api;
 
 use ApiPlatform\Test\ApiTestCase;
 use ApiPlatform\Test\Client;
-use App\Ordering\Application\Event\OrderPlaced;
-use App\Ordering\Domain\Order;
+use App\Entity\Order;
+use App\Message\OrderPlaced;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 

@@ -2,12 +2,12 @@
 
 namespace App\Tests\Support;
 
-use App\Catalog\Domain\Category;
-use App\Catalog\Domain\Product;
-use App\Catalog\Infrastructure\Foundry\ProductFactory;
-use App\Customer\Domain\Customer;
-use App\Customer\Infrastructure\Foundry\CustomerFactory;
-use App\Shared\Domain\Money;
+use App\Entity\Category;
+use App\Entity\Customer;
+use App\Entity\Embeddable\Money;
+use App\Entity\Product;
+use App\Factory\CustomerFactory;
+use App\Factory\ProductFactory;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**

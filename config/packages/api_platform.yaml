@@ -1,12 +1,6 @@
 api_platform:
     title: Webshop API
     version: 1.0.0
-    # The API resources are the entities in the Domain layer of each bounded context.
-    mapping:
-        paths:
-            - '%kernel.project_dir%/src/Catalog/Domain'
-            - '%kernel.project_dir%/src/Customer/Domain'
-            - '%kernel.project_dir%/src/Ordering/Domain'
     # JSON-LD (Hydra) is the default; plain JSON is accepted too, as most frontends send it.
     formats:
         jsonld: ['application/ld+json']

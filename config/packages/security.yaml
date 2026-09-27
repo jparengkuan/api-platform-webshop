@@ -7,7 +7,7 @@ security:
     providers:
         app_customer_provider:
             entity:
-                class: App\Customer\Domain\Customer
+                class: App\Entity\Customer
                 property: email
 
     firewalls:

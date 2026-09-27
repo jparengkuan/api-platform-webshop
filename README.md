@@ -4,7 +4,8 @@
 
 A REST/JSON-LD API for a simple webshop, built with **Symfony 8.1** and **API Platform 5**.
 Customers can register, log in through an OAuth2 client application, browse the catalog and place
-an order. Administrators maintain the product catalog.
+an order. Administrators maintain the product catalog. Every order is announced on RabbitMQ; a
+Python service turns it into an invoice PDF, which the API mails to the customer.
 
 The code follows the [Symfony best practices](https://symfony.com/doc/current/best_practices.html),
 the SOLID principles and a set of targeted design patterns (see [Architecture](#architecture)).
@@ -21,6 +22,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 - [Architecture](#architecture)
 - [Events (RabbitMQ)](#events-rabbitmq)
   - [Invoice service (Python)](#invoice-service-python)
+  - [Invoice email (Messenger worker)](#invoice-email-messenger-worker)
 - [Business rules](#business-rules)
 - [Error handling](#error-handling)
 - [Security](#security)
@@ -41,7 +43,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Orders    | Place an order with one or more lines; view own orders; admins see all orders       |
 | Stock     | Reserved when an order is placed, safe under concurrent orders                      |
 | Events    | Every placed order is published to RabbitMQ as an `OrderPlaced` event (JSON), for other systems |
-| Invoices  | A Python service turns every `OrderPlaced` into an invoice PDF and publishes it as `invoice.generated` |
+| Invoices  | A Python service turns every `OrderPlaced` into an invoice PDF (`invoice.generated`); the API mails it to the customer |
 
 ## Tech stack
 
@@ -52,9 +54,10 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | API              | API Platform 5 (JSON-LD/Hydra, OpenAPI)                          |
 | Database         | PostgreSQL 17 via Doctrine ORM 3 and Doctrine Migrations         |
 | Messaging        | Symfony Messenger with the AMQP transport, RabbitMQ 4            |
+| Email            | Symfony Mailer with Twig templates; Mailpit in DDEV              |
 | Invoice service  | Python 3.13 with `pika` and `fpdf2`; Ruff and pytest             |
 | Authentication   | OAuth2 Authorization Code + PKCE (`league/oauth2-server-bundle`); JWT access tokens, refresh tokens |
-| Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17, RabbitMQ add-on) |
+| Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17, RabbitMQ add-on, Mailpit) |
 | Production       | Docker: FrankenPHP (worker mode) behind Varnish 8, with tag-based cache invalidation; RabbitMQ 4 |
 | Tests            | PHPUnit 13, `api-platform/test`                                  |
 | Test data        | Foundry (`zenstruck/foundry`) factories and stories with Faker (`nl_NL`) |
@@ -75,7 +78,8 @@ That's why every command below runs through `ddev exec` or `ddev composer`.
 ### Step by step
 
 ```bash
-# 1. Start the containers (web with the PHP amqp extension, PostgreSQL and RabbitMQ)
+# 1. Start the containers: web (with the PHP amqp extension and the Messenger worker),
+#    PostgreSQL, RabbitMQ and the Python invoice service
 ddev start
 
 # 2. Install dependencies
@@ -98,6 +102,7 @@ ddev composer fixtures
 
 The API now runs at **https://api-platform.ddev.site/api**.
 The interactive documentation (Swagger UI) is at **https://api-platform.ddev.site/api/docs**.
+Emails (the invoices) land in Mailpit: `ddev mailpit` opens it.
 
 ### Configuration
 
@@ -112,6 +117,8 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 | `OAUTH_ENCRYPTION_KEY` | Encrypts authorization codes and refresh tokens. Dev default in `.env`; production sets its own |
 | `CORS_ALLOW_ORIGIN`  | Regex of allowed origins for browser clients                     |
 | `MESSENGER_TRANSPORT_DSN` | RabbitMQ that receives the events; DDEV points it at its RabbitMQ add-on. Tests use an in-memory transport |
+| `MAILER_DSN`         | Where emails go. `.env`: `null://null` (nothing is sent); DDEV: Mailpit; tests: always `null://null` |
+| `MAILER_FROM`        | Sender address of the emails to customers                        |
 | `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
 ### Test data
@@ -122,13 +129,14 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 |-------------|--------|--------------------------------------------------------------------------|
 | OAuth2 client | 1    | `webshop-demo`, secret `demo-secret`, redirect URI `http://localhost:3000/callback` |
 | Accounts    | 2      | `admin@example.com` (admin) and `klant@example.com` (customer)           |
-| Customers   | 50     | Dutch names; the email matches the name (`floris.devries123@gmail.com`)  |
+| Customers   | 50     | Dutch names; the email matches the name (`floris.devries123@example.net`) |
 | Categories  | 6      | Accessoires, Audio, Kantoor, Kleding, Mokken & flessen, Tassen           |
 | Products    | 200    | E.g. "Hoodie Utrecht, marineblauw" in "Kleding"; prices ending in ,95; ~10% inactive |
 | Orders      | ~460   | 1–5 lines each, spread over the last year, never before registration     |
 
 **Every account's password is `password`.** Log in as `klant@example.com` to see a customer with
-order history, or as `admin@example.com` to manage the catalog.
+order history, or as `admin@example.com` to manage the catalog. All addresses use the reserved
+`example.com/.net/.org` domains, so the demo data (also on staging) can never email a real person.
 
 > ⚠️ The command **empties the dev database first** and rebuilds the schema from the migrations.
 > Use `bin/console foundry:load-fixtures --append` to add data without resetting.
@@ -349,51 +357,84 @@ A product is sent with its category as an IRI, and returned with the category em
 
 ## Architecture
 
-### Layers
+The code uses Symfony's standard directory layout (`Entity/`, `Repository/`, `State/`, …; see
+[Project structure](#project-structure)). Within it, the use cases depend on **interfaces (ports)**
+only; the Symfony, Doctrine and RabbitMQ specifics live in the classes that implement them
+(**adapters**), bound with `#[AsAlias]`.
+
+### Placing an order
 
 ```
-HTTP (API Platform)          Application                  Domain                     Infrastructure
-───────────────────          ───────────                  ──────                     ──────────────
+HTTP (API Platform)         Use case                         Domain                    Adapters (ports)
+───────────────────         ────────                         ──────                    ────────────────
 PlaceOrderInput (DTO)  ─┐
-                        ├─▶  PlaceOrderProcessor  ─▶  PlaceOrderHandler  ─▶  Order::place()  ◀─▶  ProductRepository
-Validator (#[Assert])  ─┘       (adapter)               (use case,            Product::reserveStock()   OrderRepository
-                                                       transaction)          Money                     (Doctrine ORM)
+                        ├─▶ PlaceOrderProcessor ─▶ PlaceOrderHandler ─▶ Order::place()          ProductRepository
+Validator (#[Assert])  ─┘      (adapter)            │                  Product::reserveStock()   OrderRepository
+                                                    │                  Money                     (Doctrine ORM)
+                                                    ├─▶ TransactionManagerInterface ─▶ DoctrineTransactionManager
+                                                    └─▶ EventPublisherInterface     ─▶ MessengerEventPublisher ─▶ RabbitMQ
 ```
 
 1. **API Platform** deserializes the request into `PlaceOrderInput` and validates it with the
    Validator constraints on the DTO.
 2. **`PlaceOrderProcessor`** (adapter) turns the DTO into a `PlaceOrder` command, together with
    the logged-in customer.
-3. **`PlaceOrderHandler`** (use case) opens a transaction, loads the products with a write lock
-   and lets the domain do the work.
+3. **`PlaceOrderHandler`** (use case) runs a transaction through `TransactionManagerInterface`,
+   loads the products with a write lock and lets the domain do the work.
 4. **`Order::place()`** checks the business rules, reserves stock and calculates the total.
-5. On success the transaction commits, the handler publishes an `OrderPlaced` event (see
-   [Events](#events-rabbitmq)) and API Platform returns the order as `201`. On failure it rolls
-   back, nothing is stored and nothing is published.
+5. After the commit the handler publishes an `OrderPlaced` event through `EventPublisherInterface`
+   (see [Events](#events-rabbitmq)), and API Platform returns the order as `201`. On failure the
+   transaction rolls back, nothing is stored and nothing is published.
+
+### Mailing an invoice
+
+```
+RabbitMQ invoice_generated ─▶ InvoiceEventSerializer ─▶ SendInvoiceEmailHandler ─▶ CustomerRepositoryInterface ─▶ CustomerRepository
+                              (JSON → InvoiceGenerated)   (use case)               └▶ InvoiceMailerInterface     ─▶ TwigInvoiceMailer ─▶ SMTP
+```
+
+### Ports and adapters
+
+| Port (interface)                | Adapter                        | Used by                                    |
+|---------------------------------|--------------------------------|--------------------------------------------|
+| `ProductRepositoryInterface`    | `ProductRepository` (Doctrine) | `PlaceOrderHandler`                        |
+| `OrderRepositoryInterface`      | `OrderRepository` (Doctrine)   | `PlaceOrderHandler`                        |
+| `CustomerRepositoryInterface`   | `CustomerRepository` (Doctrine)| `SendInvoiceEmailHandler`                  |
+| `TransactionManagerInterface`   | `DoctrineTransactionManager`   | `PlaceOrderHandler`                        |
+| `EventPublisherInterface`       | `MessengerEventPublisher` (Messenger → RabbitMQ) | `PlaceOrderHandler`      |
+| `InvoiceMailerInterface`        | `TwigInvoiceMailer` (Mailer + Twig) | `SendInvoiceEmailHandler`             |
+
+In unit tests the ports get in-memory stand-ins (`tests/Support/RecordingEventPublisher`, stubs),
+so the use cases are tested without a database, broker or mail server.
 
 ### SOLID in practice
 
 | Principle                 | Where                                                                                      |
 |---------------------------|--------------------------------------------------------------------------------------------|
-| **S**ingle Responsibility | Processor = HTTP translation, handler = transaction, entities = business rules, repository = storage |
-| **O**pen/Closed           | A new business rule = a new subclass of `OrderingException`; the 422 mapping doesn't change |
-| **L**iskov Substitution   | Every implementation of the repository interfaces must honor the same contract (e.g. an in-memory variant for tests) |
-| **I**nterface Segregation | Small repository interfaces with only what the use case needs (`findForUpdate`, `add`)     |
-| **D**ependency Inversion  | `PlaceOrderHandler` depends on interfaces and `Psr\Clock\ClockInterface`, not on Doctrine classes |
+| **S**ingle Responsibility | Processor = HTTP translation, handler = use case, entities = business rules, repository = storage, publisher = delivery to RabbitMQ, mailer = building and sending the email |
+| **O**pen/Closed           | A new business rule = a new subclass of `BusinessRuleViolation`, the 422 mapping doesn't change. A new event implements `IntegrationEvent` and names its own routing key; the publisher doesn't change |
+| **L**iskov Substitution   | Every implementation of a port honors the same contract, e.g. `EventPublisherInterface::publish()` never throws, in production and in the test double |
+| **I**nterface Segregation | Small ports with only what a use case needs: `findForUpdate()`, `add()`, `findById()`, `publish()`, `send()` |
+| **D**ependency Inversion  | The use cases depend on ports and `Psr\Clock\ClockInterface`, not on Doctrine, Messenger or Mailer classes |
 
 ### Design patterns
 
 | Pattern                 | Class(es)                                         | Why                                                        |
 |-------------------------|---------------------------------------------------|------------------------------------------------------------|
-| Repository              | `ProductRepository`, `OrderRepository`            | Storage logic separated from domain and use case           |
+| Ports and Adapters      | See the table above                               | Use cases independent of frameworks; easy to test and replace |
+| Repository              | `ProductRepository`, `OrderRepository`, `CustomerRepository` | Storage logic separated from domain and use case |
 | Command + Handler       | `PlaceOrder`, `PlaceOrderHandler`                 | Use case independent of HTTP; reusable from CLI or Messenger |
-| Adapter                 | `PlaceOrderProcessor`                             | Connects API Platform to the use case                      |
+| Unit of Work            | `TransactionManagerInterface`                     | One transaction per use case, rolled back as a whole       |
+| Publish/Subscribe       | `IntegrationEvent`, `OrderPlaced`, `InvoiceGenerated` over the `webshop.events` topic exchange | Services react to events without knowing each other |
+| Adapter                 | `PlaceOrderProcessor`, `MessengerEventPublisher`, `TwigInvoiceMailer` | Connects a framework to a use case |
+| Translator              | `InvoiceEventSerializer`                          | Maps the Python service's JSON (`type: invoice.generated`) to a PHP message |
 | Data Transfer Object    | `PlaceOrderInput`, `OrderLineInput`               | API contract decoupled from the domain model               |
 | Aggregate Root          | `Order` (with `OrderLine`)                        | Lines can only be created through the order                |
-| Factory Method          | `Order::place()`, `Money::zero()`, named constructors on exceptions | Always a valid object; intent in the name |
+| Factory Method          | `Order::place()`, `OrderPlaced::fromOrder()`, `Money::zero()`, named constructors on exceptions | Always a valid object; intent in the name |
 | Value Object            | `Money` (Doctrine embeddable, `readonly`)         | Immutable, self-validating, no float rounding              |
 | Snapshot                | `OrderLine` copies SKU, name and price            | Later catalog changes never alter past orders              |
 | Query Extension         | `CurrentCustomerOrdersExtension`                  | Automatically filters `GET /api/orders` to the logged-in customer |
+| Strategy                | `InvoiceRenderer` in the Python service           | The document format can change without touching the consumer |
 
 ### Concurrency
 
@@ -405,8 +446,9 @@ Two customers ordering the last item at the same time must not both succeed. Tha
   deadlock each other.
 - `Query::HINT_REFRESH` makes sure stock is read from the database *after* the lock is acquired,
   even when the product was already in the identity map.
-- On an exception, `EntityManager::wrapInTransaction()` rolls back and closes the EntityManager.
-  Stock already deducted in memory can therefore never be flushed afterwards.
+- On an exception, `DoctrineTransactionManager` (`EntityManager::wrapInTransaction()`) rolls back
+  and closes the EntityManager. Stock already deducted in memory can therefore never be flushed
+  afterwards.
 
 ---
 
@@ -414,7 +456,7 @@ Two customers ordering the last item at the same time must not both succeed. Tha
 
 Other systems (fulfilment, mail, analytics) learn about orders from events, not by polling the API.
 After an order is committed, `PlaceOrderHandler` publishes an **`OrderPlaced`** event through
-Symfony Messenger:
+`EventPublisherInterface`; `MessengerEventPublisher` sends it with Symfony Messenger:
 
 | Setting       | Value                                                                     |
 |---------------|---------------------------------------------------------------------------|
@@ -458,8 +500,9 @@ ddev exec -s rabbitmq rabbitmqadmin get messages --queue=invoice_generated
 The management UI runs at `https://api-platform.ddev.site:15673` (user `rabbitmq`, password `rabbitmq`).
 
 In tests the `events` transport is `in-memory://?serialize=true`: `PlaceOrderTest` checks the
-published event after its JSON round trip, and `PlaceOrderHandlerTest` checks the routing key, that
-it's published after the commit, and that a broker failure doesn't fail the order.
+published event after its JSON round trip. `PlaceOrderHandlerTest` checks that it's published only
+after the commit, and `MessengerEventPublisherTest` checks the routing key and that a broker
+failure is logged instead of failing the order.
 
 ### Invoice service (Python)
 
@@ -475,8 +518,8 @@ API ──order.placed──▶ webshop.events ──▶ order_placed ──▶ 
 1. It consumes the `order_placed` queue, one message at a time.
 2. It renders the invoice (number, date, order, customer, lines, total) as an A4 PDF.
 3. It publishes an **`invoice.generated`** event to the `webshop.events` exchange, with the PDF
-   Base64-encoded in the JSON. The durable `invoice_generated` queue keeps these events until a
-   consumer (a mailer, an archive) reads them.
+   Base64-encoded in the JSON. The durable `invoice_generated` queue keeps these events until the
+   API's [mailer worker](#invoice-email-messenger-worker) reads them.
 4. Only then does it acknowledge the `OrderPlaced` message.
 
 ```json
@@ -491,8 +534,8 @@ API ──order.placed──▶ webshop.events ──▶ order_placed ──▶ 
 }
 ```
 
-The message has `content_type: application/json`, `type: invoice.generated` and the invoice number
-as `message_id`.
+The message has `content_type: application/json`, the header `type: invoice.generated` (read by
+Symfony Messenger) and the invoice number as `message_id`.
 
 | Situation                            | What happens                                                        |
 |--------------------------------------|---------------------------------------------------------------------|
@@ -516,6 +559,37 @@ and staging deploys only when that job passes too.
 
 Limitations: the invoice shows the customer id, not a name or address (the event doesn't carry
 them), has no VAT breakdown and only uses Latin-1 characters (anything else becomes `?`).
+
+### Invoice email (Messenger worker)
+
+The API mails every invoice to the customer. A Messenger worker consumes the `invoice_generated`
+queue (transport `invoices` in `config/packages/messenger.yaml`):
+
+1. `InvoiceEventSerializer` turns the JSON of the Python service into an `InvoiceGenerated` message
+   (Symfony's serializer maps the `type: invoice.generated` header to the class).
+2. `SendInvoiceEmailHandler` looks up the customer by `customerId` and checks the PDF.
+3. `TwigInvoiceMailer` sends an HTML and text email (`templates/emails/invoice.*.twig`) from
+   `MAILER_FROM`, with the PDF attached.
+
+| Situation                            | What happens                                                        |
+|--------------------------------------|---------------------------------------------------------------------|
+| The mail server is unreachable       | Retried after 1, 5 and 25 minutes, then dropped and logged          |
+| Unknown customer, or no valid PDF    | Rejected at once without retry (`UnrecoverableMessageHandlingException`) |
+| The worker restarts                  | Unacknowledged messages are delivered again                         |
+
+Running the worker:
+
+| Where      | How                                                                              |
+|------------|----------------------------------------------------------------------------------|
+| DDEV       | A daemon in the web container (`web_extra_daemons` in `.ddev/config.yaml`); emails go to Mailpit (`ddev mailpit`) |
+| Production | The `worker` service in `compose.prod.yaml`: the app image running `bin/console messenger:consume invoices` |
+| By hand    | `ddev exec bin/console messenger:consume invoices -vv`                            |
+
+After changing PHP code, restart the worker (`ddev restart`, or `bin/console messenger:stop-workers`):
+it keeps the old code in memory.
+
+`tests/Integration/InvoiceEmailTest` feeds a message exactly as the Python service sends it through
+the serializer and the handler, and checks the email, its recipient and the attachment.
 
 ---
 
@@ -564,7 +638,8 @@ Example of a broken business rule:
 
 **How this works technically:**
 
-- All business errors extend `App\Exception\OrderingException`.
+- All business errors extend `App\Exception\BusinessRuleViolation`: the stock errors of the
+  catalog directly, the order's own rules through `OrderingException`.
 - The order operation maps that base class to 422 via `exceptionToStatus`.
 - `#[WithLogLevel(LogLevel::INFO)]` logs them as an expected outcome instead of `critical`, so
   they don't trigger alerts in production.
@@ -631,7 +706,9 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 |--------------------------------|-------------------------|------------------------------------------------------------|
 | `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots        |
-| `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published after the commit, with its routing key; a broker failure doesn't fail the order |
+| `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published only after the commit; a rejected order is never published |
+| `tests/Unit/Messenger/MessengerEventPublisherTest` | Unit | Routing key per event; a broker failure is logged, not thrown |
+| `tests/Integration/InvoiceEmailTest` | Integration (kernel) | Invoice from the Python service → email with PDF to the customer; unknown customer isn't retried; retry round trip |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
 | `tests/Api/OAuthTest`          | Functional (HTTP)       | Authorization Code flow, PKCE, redirect URIs, client secret, refresh tokens, disabled grants |
 | `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, category filters, admin management, validation, JSON schema |
@@ -641,9 +718,10 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
 tables before every test. They create their data with the same Foundry factories as the dev
-fixtures. `tests/Api/WebshopTestTrait.php` wraps them so each test pins down exactly what it relies on
-(SKU, price, stock, active) and leaves the rest random. Its `login()` helper runs the real OAuth2
-flow, exactly like a client application: `/authorize` → login page → callback with a code → `/token`.
+fixtures. `tests/Support/DatabaseFixturesTrait.php` wraps them so each test pins down exactly what
+it relies on (SKU, price, stock, active) and leaves the rest random. `tests/Api/WebshopTestTrait.php`
+adds the HTTP helpers: its `login()` runs the real OAuth2 flow, exactly like a client application:
+`/authorize` → login page → callback with a code → `/token`.
 Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 
 ### Static analysis
@@ -662,13 +740,17 @@ DDEV is for development only. For servers there is a production stack in `compos
 ```
 reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
   e.g. Coolify           HTTP cache       Symfony app   ──→  RabbitMQ 4 (events)  ⇄  invoice service
+                                                              │
+                                          worker (mails the invoices)  ◀──┘  ──→  SMTP
 ```
 
 - **FrankenPHP** runs PHP and the Caddy web server in one container, in **worker mode**: the
   Symfony kernel stays in memory between requests, so responses take a few milliseconds.
 - **Varnish** caches public responses (see [HTTP caching](#http-caching-varnish)).
-- **RabbitMQ** receives the `OrderPlaced` events (see [Events](#events-rabbitmq)). It's only
-  reachable inside the stack.
+- **RabbitMQ** carries the events (see [Events](#events-rabbitmq)). It's only reachable inside
+  the stack.
+- **invoice** (Python) turns `OrderPlaced` into invoice PDFs; **worker** (the app image running
+  `messenger:consume invoices`) mails them to the customers.
 - **TLS** is terminated by the hosting platform's reverse proxy in front of Varnish (Coolify
   does this automatically, with Let's Encrypt). The stack itself only speaks HTTP and publishes no
   public ports.
@@ -688,6 +770,8 @@ curl http://127.0.0.1:8080/api/products     # through Varnish, from the server i
 | `OAUTH_ENCRYPTION_KEY`     | Encrypts authorization codes and refresh tokens, e.g. `openssl rand -hex 32` |
 | `POSTGRES_PASSWORD`        | Database password (`POSTGRES_DB`/`POSTGRES_USER` default to `app`)    |
 | `RABBITMQ_PASSWORD`        | RabbitMQ password (`RABBITMQ_USER` defaults to `app`), e.g. `openssl rand -hex 16`; the app's `MESSENGER_TRANSPORT_DSN` is built from it |
+| `MAILER_DSN`               | Mail server for the invoice emails, e.g. `smtp://user:pass@smtp.example.com:587`. `null://null` sends nothing; use a sandbox (e.g. Mailtrap) on staging |
+| `MAILER_FROM`              | Sender address of the invoice emails                                  |
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
 | `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |
@@ -752,7 +836,8 @@ server starts:
 5. With `RESET_DEMO_DATA=1` only: loads the demo fixtures.
 
 Compose starts the services in order and waits for each health check: PostgreSQL and RabbitMQ,
-then the app, then Varnish.
+then the app and the invoice service, then Varnish and the worker. The worker runs the same image
+without the web server; it stops after an hour (or 128 MB) and Docker starts a fresh one.
 
 ### The images
 
@@ -763,7 +848,7 @@ then the app, then Varnish.
 | Runs as the unprivileged user `app`     | A compromised process has no root in the container                     |
 | OPcache without timestamp checks        | Code never changes in a running container                              |
 | `.dockerignore` excludes `.env.*.local`, `config/jwt/*.pem`, `.git`, tests | Secrets and dev files never end up in the image |
-| Health checks on the app (Caddy admin endpoint), Varnish (`varnishadm ping`) and RabbitMQ (`rabbitmq-diagnostics ping`) | Docker and the platform see when a container is unhealthy |
+| Health checks on the app (Caddy admin endpoint), Varnish (`varnishadm ping`) and RabbitMQ (`rabbitmq-diagnostics ping`); off for the worker, which has no web server | Docker and the platform see when a container is unhealthy |
 | VCL baked into the Varnish image (`docker/varnish/Dockerfile`) | Deploying needs no bind mounts            |
 
 Data lives in three named volumes: `database_data` (PostgreSQL), `jwt_keys` and `rabbitmq_data`
@@ -781,6 +866,8 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 
 ## Project structure
 
+Symfony's standard layout: one directory per kind of class.
+
 ```
 ├── .github/                 CI workflow and the shared PHP setup action
 ├── config/                  Symfony configuration (packages, routes, services)
@@ -789,31 +876,38 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 │   ├── php/                 Production php.ini
 │   └── varnish/             VCL and image of the HTTP cache
 ├── migrations/              Doctrine migrations (never change the schema by hand)
+├── services/invoice/        Python service: OrderPlaced in, invoice PDF out (invoice.generated)
 ├── src/
 │   ├── ApiResource/         Shared API settings (HTTP cache headers)
 │   ├── Command/             Console commands (app:oauth:generate-keys)
 │   ├── Controller/          SecurityController: the login page of the OAuth2 flow
-│   ├── EventListener/       AuthorizationRequestListener: approves /authorize requests with PKCE
-│   ├── Doctrine/            API Platform query extensions
+│   ├── Doctrine/            API Platform query extension (CurrentCustomerOrdersExtension)
 │   ├── Dto/                 API input DTOs
 │   ├── Entity/              Doctrine entities and API resources
 │   │   └── Embeddable/      Value objects (Money)
 │   ├── Enum/                Backed enums (OrderStatus)
-│   ├── Exception/           Domain exceptions
-│   ├── Message/             Integration events published to RabbitMQ (OrderPlaced)
+│   ├── EventListener/       AuthorizationRequestListener: approves /authorize requests with PKCE
+│   ├── Exception/           Domain exceptions (BusinessRuleViolation and its subclasses)
 │   ├── Factory/             Foundry factories for test data (dev/test only)
+│   ├── Mailer/              InvoiceMailerInterface and its Twig/Mailer implementation
+│   ├── Message/             Integration events (IntegrationEvent, OrderPlaced, InvoiceGenerated)
+│   ├── MessageHandler/      SendInvoiceEmailHandler (runs in the Messenger worker)
+│   ├── Messenger/           EventPublisherInterface, MessengerEventPublisher, InvoiceEventSerializer
 │   ├── Ordering/            Use case: PlaceOrder command and handler
 │   ├── Repository/          Repository interfaces and Doctrine implementations
 │   ├── State/               API Platform state providers and processors
-│   └── Story/               Foundry story with the full dev data set
-├── services/invoice/        Python service: OrderPlaced in, invoice PDF out (invoice.generated)
-├── templates/security/      The login page
+│   ├── Story/               Foundry story with the full dev data set
+│   └── Transaction/         TransactionManagerInterface and its Doctrine implementation
+├── templates/
+│   ├── emails/              The invoice email (HTML and text)
+│   └── security/            The login page
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
-│   ├── Support/             Test doubles (RecordingPurger)
-│   └── Unit/                Domain unit tests
+│   ├── Integration/         Kernel tests without HTTP (the invoice email)
+│   ├── Support/             Fixture helpers and test doubles (RecordingPurger, RecordingEventPublisher)
+│   └── Unit/                Unit tests of entities, use cases and adapters
 ├── Dockerfile               Production image (FrankenPHP, worker mode)
-├── compose.prod.yaml        Production stack: Varnish + app + PostgreSQL + RabbitMQ + invoice service
+├── compose.prod.yaml        Production stack: Varnish, app, worker, PostgreSQL, RabbitMQ, invoice service
 ├── .php-cs-fixer.dist.php   Code style (@Symfony)
 ├── phpstan.dist.neon        Static analysis (level 5)
 └── phpunit.dist.xml         PHPUnit configuration
@@ -829,6 +923,8 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
   No YAML or XML routing.
 - **Autowiring**: dependencies through the constructor with type hints. A YAML service
   definition is the last resort.
+- **Ports and adapters**: a use case depends on an interface; the implementation binds itself to
+  it with `#[AsAlias(TheInterface::class)]`.
 - **Schema changes** always go through a migration:
   ```bash
   ddev exec bin/console make:migration
@@ -858,7 +954,10 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
   which this project doesn't allow (`allow-contrib: false`). Enabling it would make the test
   isolation transactional and faster.
 - **Catalog:** inactive products still show up in the public list, although they can't be ordered.
-- **Notifications:** an order confirmation email, sent asynchronously via Symfony Messenger and Mailer.
+- **Events at most once:** `OrderPlaced` is published directly after the commit. When RabbitMQ is
+  down the event is lost (and logged); a transactional outbox would make it reliable.
+- **Invoice emails:** a crash right after sending can send an email twice, and after the last retry
+  a failed email is dropped (logged) instead of kept in a failure transport.
 - **Concurrency test:** the locking is designed for concurrent orders, but there is no test yet
   that actually fires parallel requests.
 
