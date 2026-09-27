@@ -1,4 +1,5 @@
 # Production stack:  reverse proxy (TLS)  →  varnish :80  →  php :80  →  database
+#                                                                 └──→  rabbitmq (events)  ⇄  invoice
 #
 # Runs behind the hosting platform's reverse proxy (e.g. Coolify), which terminates TLS and
 # forwards the domain to the "varnish" service on port 80. Nothing is exposed publicly by
@@ -48,12 +49,45 @@ services:
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-^https?://localhost(:[0-9]+)?$}
       # Where API Platform sends BAN requests to invalidate cached responses.
       VARNISH_URL: http://varnish
+      # RabbitMQ that receives the integration events (OrderPlaced).
+      MESSENGER_TRANSPORT_DSN: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}@rabbitmq:5672/%2f
       # Staging/test only: replace all data with the demo fixtures on every start.
       RESET_DEMO_DATA: ${RESET_DEMO_DATA:-0}
     volumes:
       - jwt_keys:/app/config/jwt
     depends_on:
       database:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    # RabbitMQ stores its data per node name, which is derived from the hostname: keep it fixed.
+    hostname: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-app}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Python service: turns every OrderPlaced event into an invoice PDF, published as invoice.generated.
+  invoice:
+    build:
+      context: services/invoice
+    image: ${IMAGE_NAME:-api-platform-webshop}-invoice:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      AMQP_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}@rabbitmq:5672/%2f
+    depends_on:
+      rabbitmq:
         condition: service_healthy
 
   database:
@@ -75,3 +109,4 @@ services:
 volumes:
   database_data:
   jwt_keys:
+  rabbitmq_data:

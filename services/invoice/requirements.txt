@@ -1,0 +1,3 @@
+# Runtime dependencies of the invoice service.
+fpdf2==2.8.4
+pika==1.3.2

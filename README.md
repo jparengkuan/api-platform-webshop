@@ -19,6 +19,8 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 - [Authentication (OAuth2)](#authentication-oauth2)
 - [Using the API](#using-the-api)
 - [Architecture](#architecture)
+- [Events (RabbitMQ)](#events-rabbitmq)
+  - [Invoice service (Python)](#invoice-service-python)
 - [Business rules](#business-rules)
 - [Error handling](#error-handling)
 - [Security](#security)
@@ -38,6 +40,8 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Catalog   | Browse products (public), filter by category; manage products and categories (admin only) |
 | Orders    | Place an order with one or more lines; view own orders; admins see all orders       |
 | Stock     | Reserved when an order is placed, safe under concurrent orders                      |
+| Events    | Every placed order is published to RabbitMQ as an `OrderPlaced` event (JSON), for other systems |
+| Invoices  | A Python service turns every `OrderPlaced` into an invoice PDF and publishes it as `invoice.generated` |
 
 ## Tech stack
 
@@ -47,9 +51,11 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Framework        | Symfony 8.1                                                      |
 | API              | API Platform 5 (JSON-LD/Hydra, OpenAPI)                          |
 | Database         | PostgreSQL 17 via Doctrine ORM 3 and Doctrine Migrations         |
+| Messaging        | Symfony Messenger with the AMQP transport, RabbitMQ 4            |
+| Invoice service  | Python 3.13 with `pika` and `fpdf2`; Ruff and pytest             |
 | Authentication   | OAuth2 Authorization Code + PKCE (`league/oauth2-server-bundle`); JWT access tokens, refresh tokens |
-| Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17)      |
-| Production       | Docker: FrankenPHP (worker mode) behind Varnish 8, with tag-based cache invalidation |
+| Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17, RabbitMQ add-on) |
+| Production       | Docker: FrankenPHP (worker mode) behind Varnish 8, with tag-based cache invalidation; RabbitMQ 4 |
 | Tests            | PHPUnit 13, `api-platform/test`                                  |
 | Test data        | Foundry (`zenstruck/foundry`) factories and stories with Faker (`nl_NL`) |
 | Quality          | PHPStan (level 5) with Symfony/Doctrine/PHPUnit extensions, PHP-CS-Fixer (`@Symfony`) |
@@ -69,7 +75,7 @@ That's why every command below runs through `ddev exec` or `ddev composer`.
 ### Step by step
 
 ```bash
-# 1. Start the containers
+# 1. Start the containers (web with the PHP amqp extension, PostgreSQL and RabbitMQ)
 ddev start
 
 # 2. Install dependencies
@@ -105,6 +111,7 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 | `OAUTH_PASSPHRASE`   | Encrypts the private key. The value in `.env` is a dev default; production sets its own |
 | `OAUTH_ENCRYPTION_KEY` | Encrypts authorization codes and refresh tokens. Dev default in `.env`; production sets its own |
 | `CORS_ALLOW_ORIGIN`  | Regex of allowed origins for browser clients                     |
+| `MESSENGER_TRANSPORT_DSN` | RabbitMQ that receives the events; DDEV points it at its RabbitMQ add-on. Tests use an in-memory transport |
 | `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
 ### Test data
@@ -360,8 +367,9 @@ Validator (#[Assert])  ─┘       (adapter)               (use case,          
 3. **`PlaceOrderHandler`** (use case) opens a transaction, loads the products with a write lock
    and lets the domain do the work.
 4. **`Order::place()`** checks the business rules, reserves stock and calculates the total.
-5. On success the transaction commits and API Platform returns the order as `201`. On failure it
-   rolls back and nothing is stored.
+5. On success the transaction commits, the handler publishes an `OrderPlaced` event (see
+   [Events](#events-rabbitmq)) and API Platform returns the order as `201`. On failure it rolls
+   back, nothing is stored and nothing is published.
 
 ### SOLID in practice
 
@@ -399,6 +407,115 @@ Two customers ordering the last item at the same time must not both succeed. Tha
   even when the product was already in the identity map.
 - On an exception, `EntityManager::wrapInTransaction()` rolls back and closes the EntityManager.
   Stock already deducted in memory can therefore never be flushed afterwards.
+
+---
+
+## Events (RabbitMQ)
+
+Other systems (fulfilment, mail, analytics) learn about orders from events, not by polling the API.
+After an order is committed, `PlaceOrderHandler` publishes an **`OrderPlaced`** event through
+Symfony Messenger:
+
+| Setting       | Value                                                                     |
+|---------------|---------------------------------------------------------------------------|
+| Exchange      | `webshop.events` (type `topic`)                                           |
+| Routing key   | `order.placed`                                                            |
+| Queue         | `order_placed`, bound to `order.placed`, durable; declared on the first publish |
+| Format        | JSON (`content_type: application/json`), header `type: App\Message\OrderPlaced` |
+| Configuration | `config/packages/messenger.yaml` (transport `events`)                     |
+
+```json
+{
+  "orderId": "01a0e480-2c56-7901-8a69-d653265d5d1f",
+  "customerId": "01a0e480-2bc1-7f5f-8f48-3edd8527ee2c",
+  "placedAt": "2026-09-22T20:54:48+00:00",
+  "totalAmount": 26775,
+  "currency": "EUR",
+  "lines": [
+    {"productId": "01a0e480-2bf6-706d-b99f-ff1c55f121de", "sku": "NOT-57333", "name": "Notitieboek Amsterdam, zwart", "quantity": 1, "unitPrice": 1395}
+  ]
+}
+```
+
+Amounts are in minor units (cents), like everywhere in the API. `productId` is `null` when the
+product no longer exists.
+
+- **Published after the commit:** a rolled-back order is never announced.
+- **At most once:** the event is published directly, without an outbox. If RabbitMQ is
+  unreachable, the order still succeeds, the error is logged (`Could not publish OrderPlaced…`) and
+  that event is lost. Consumers that must see every order can reconcile with `GET /api/orders`.
+- **Consumers:** the `order_placed` queue belongs to the [invoice service](#invoice-service-python).
+  Other systems bind **their own** queue to `webshop.events` with the key `order.placed`, so each
+  one receives every event. The API doesn't consume its own events.
+
+Locally, DDEV's RabbitMQ add-on receives the events. Inspect them with:
+
+```bash
+ddev exec -s rabbitmq rabbitmqctl list_queues name messages consumers
+ddev exec -s rabbitmq rabbitmqadmin get messages --queue=invoice_generated
+```
+
+The management UI runs at `https://api-platform.ddev.site:15673` (user `rabbitmq`, password `rabbitmq`).
+
+In tests the `events` transport is `in-memory://?serialize=true`: `PlaceOrderTest` checks the
+published event after its JSON round trip, and `PlaceOrderHandlerTest` checks the routing key, that
+it's published after the commit, and that a broker failure doesn't fail the order.
+
+### Invoice service (Python)
+
+`services/invoice/` is a small Python 3.13 service (`pika`, `fpdf2`) that turns every order into
+an invoice PDF:
+
+```
+API ──order.placed──▶ webshop.events ──▶ order_placed ──▶ invoice service
+                                                             │ renders the PDF
+    invoice_generated ◀── webshop.events ◀──invoice.generated┘
+```
+
+1. It consumes the `order_placed` queue, one message at a time.
+2. It renders the invoice (number, date, order, customer, lines, total) as an A4 PDF.
+3. It publishes an **`invoice.generated`** event to the `webshop.events` exchange, with the PDF
+   Base64-encoded in the JSON. The durable `invoice_generated` queue keeps these events until a
+   consumer (a mailer, an archive) reads them.
+4. Only then does it acknowledge the `OrderPlaced` message.
+
+```json
+{
+  "invoiceNumber": "INV-01a0e480-2c56-7901-8a69-d653265d5d1f",
+  "orderId": "01a0e480-2c56-7901-8a69-d653265d5d1f",
+  "customerId": "01a0e480-2bc1-7f5f-8f48-3edd8527ee2c",
+  "generatedAt": "2026-09-27T23:22:04+00:00",
+  "fileName": "INV-01a0e480-2c56-7901-8a69-d653265d5d1f.pdf",
+  "contentType": "application/pdf",
+  "pdfBase64": "JVBERi0xLjMK…"
+}
+```
+
+The message has `content_type: application/json`, `type: invoice.generated` and the invoice number
+as `message_id`.
+
+| Situation                            | What happens                                                        |
+|--------------------------------------|---------------------------------------------------------------------|
+| RabbitMQ restarts or the service crashes mid-way | The unacknowledged `OrderPlaced` is delivered again; the service reconnects every 5 seconds |
+| The same order arrives twice         | Same invoice number (`INV-<orderId>`), so consumers can drop duplicates by `message_id` |
+| Malformed message                    | Logged and rejected without requeue (it would never succeed)        |
+| Other routing keys                   | Acknowledged and ignored                                            |
+
+Develop and test it (Python 3.13, or in any `python:3.13` container):
+
+```bash
+cd services/invoice
+pip install -r requirements-dev.txt
+ruff check . && ruff format --check .
+pytest
+```
+
+In DDEV it runs as the `invoice` service with its code mounted: `ddev restart` picks up changes and
+`ddev logs -s invoice` shows what it does. CI runs Ruff and pytest in the **Invoice service** job,
+and staging deploys only when that job passes too.
+
+Limitations: the invoice shows the customer id, not a name or address (the event doesn't carry
+them), has no VAT breakdown and only uses Latin-1 characters (anything else becomes `?`).
 
 ---
 
@@ -514,6 +631,7 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 |--------------------------------|-------------------------|------------------------------------------------------------|
 | `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots        |
+| `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published after the commit, with its routing key; a broker failure doesn't fail the order |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
 | `tests/Api/OAuthTest`          | Functional (HTTP)       | Authorization Code flow, PKCE, redirect URIs, client secret, refresh tokens, disabled grants |
 | `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, category filters, admin management, validation, JSON schema |
@@ -543,12 +661,14 @@ DDEV is for development only. For servers there is a production stack in `compos
 
 ```
 reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
-  e.g. Coolify           HTTP cache       Symfony app
+  e.g. Coolify           HTTP cache       Symfony app   ──→  RabbitMQ 4 (events)  ⇄  invoice service
 ```
 
 - **FrankenPHP** runs PHP and the Caddy web server in one container, in **worker mode**: the
   Symfony kernel stays in memory between requests, so responses take a few milliseconds.
 - **Varnish** caches public responses (see [HTTP caching](#http-caching-varnish)).
+- **RabbitMQ** receives the `OrderPlaced` events (see [Events](#events-rabbitmq)). It's only
+  reachable inside the stack.
 - **TLS** is terminated by the hosting platform's reverse proxy in front of Varnish (Coolify
   does this automatically, with Let's Encrypt). The stack itself only speaks HTTP and publishes no
   public ports.
@@ -567,6 +687,7 @@ curl http://127.0.0.1:8080/api/products     # through Varnish, from the server i
 | `OAUTH_PASSPHRASE`         | Encrypts the OAuth2 signing key, e.g. `openssl rand -hex 32`. Never change it afterwards |
 | `OAUTH_ENCRYPTION_KEY`     | Encrypts authorization codes and refresh tokens, e.g. `openssl rand -hex 32` |
 | `POSTGRES_PASSWORD`        | Database password (`POSTGRES_DB`/`POSTGRES_USER` default to `app`)    |
+| `RABBITMQ_PASSWORD`        | RabbitMQ password (`RABBITMQ_USER` defaults to `app`), e.g. `openssl rand -hex 16`; the app's `MESSENGER_TRANSPORT_DSN` is built from it |
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
 | `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |
@@ -630,8 +751,8 @@ server starts:
 4. Runs the migrations (`--all-or-nothing`: a failing migration changes nothing).
 5. With `RESET_DEMO_DATA=1` only: loads the demo fixtures.
 
-Compose starts the services in order and waits for each health check: PostgreSQL, then the app,
-then Varnish.
+Compose starts the services in order and waits for each health check: PostgreSQL and RabbitMQ,
+then the app, then Varnish.
 
 ### The images
 
@@ -642,12 +763,13 @@ then Varnish.
 | Runs as the unprivileged user `app`     | A compromised process has no root in the container                     |
 | OPcache without timestamp checks        | Code never changes in a running container                              |
 | `.dockerignore` excludes `.env.*.local`, `config/jwt/*.pem`, `.git`, tests | Secrets and dev files never end up in the image |
-| Health checks on the app (Caddy admin endpoint) and Varnish (`varnishadm ping`) | Docker and the platform see when a container is unhealthy |
+| Health checks on the app (Caddy admin endpoint), Varnish (`varnishadm ping`) and RabbitMQ (`rabbitmq-diagnostics ping`) | Docker and the platform see when a container is unhealthy |
 | VCL baked into the Varnish image (`docker/varnish/Dockerfile`) | Deploying needs no bind mounts            |
 
-Data lives in two named volumes: `database_data` (PostgreSQL) and `jwt_keys`. **Back up
-`database_data`** (e.g. a daily `pg_dump`); it also holds the OAuth2 clients and refresh tokens.
-The signing keys are regenerated if lost (users then log in again).
+Data lives in three named volumes: `database_data` (PostgreSQL), `jwt_keys` and `rabbitmq_data`
+(events not consumed yet). **Back up `database_data`** (e.g. a daily `pg_dump`); it also holds the
+OAuth2 clients and refresh tokens. The signing keys are regenerated if lost (users then log in
+again).
 
 Run a console command in production:
 
@@ -678,18 +800,20 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 │   │   └── Embeddable/      Value objects (Money)
 │   ├── Enum/                Backed enums (OrderStatus)
 │   ├── Exception/           Domain exceptions
+│   ├── Message/             Integration events published to RabbitMQ (OrderPlaced)
 │   ├── Factory/             Foundry factories for test data (dev/test only)
 │   ├── Ordering/            Use case: PlaceOrder command and handler
 │   ├── Repository/          Repository interfaces and Doctrine implementations
 │   ├── State/               API Platform state providers and processors
 │   └── Story/               Foundry story with the full dev data set
+├── services/invoice/        Python service: OrderPlaced in, invoice PDF out (invoice.generated)
 ├── templates/security/      The login page
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
 │   ├── Support/             Test doubles (RecordingPurger)
 │   └── Unit/                Domain unit tests
 ├── Dockerfile               Production image (FrankenPHP, worker mode)
-├── compose.prod.yaml        Production stack: Varnish + app + PostgreSQL
+├── compose.prod.yaml        Production stack: Varnish + app + PostgreSQL + RabbitMQ + invoice service
 ├── .php-cs-fixer.dist.php   Code style (@Symfony)
 ├── phpstan.dist.neon        Static analysis (level 5)
 └── phpunit.dist.xml         PHPUnit configuration

@@ -1,0 +1,18 @@
+# The Python invoice service (services/invoice) in DDEV: consumes OrderPlaced from the rabbitmq
+# add-on and publishes invoice.generated. The source is mounted, so `ddev restart` picks up changes.
+services:
+  invoice:
+    container_name: ddev-${DDEV_SITENAME}-invoice
+    build:
+      context: ../services/invoice
+    image: ddev-${DDEV_SITENAME}-invoice
+    labels:
+      com.ddev.site-name: ${DDEV_SITENAME}
+      com.ddev.approot: ${DDEV_APPROOT}
+    restart: unless-stopped
+    environment:
+      AMQP_URL: amqp://rabbitmq:rabbitmq@rabbitmq:5672/%2f
+    volumes:
+      - ../services/invoice/invoice_service:/app/invoice_service:ro
+    depends_on:
+      - rabbitmq
