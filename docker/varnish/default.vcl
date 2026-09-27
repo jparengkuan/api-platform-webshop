@@ -56,6 +56,11 @@ sub vcl_recv {
     if (req.method == "GET" && req.url == "/healthz") {
         return (synth(200, "OK"));
     }
+
+    # The OAuth2 login flow is personal and session-based: never cache it, whatever the headers say.
+    if (req.url ~ "^/(authorize|login|logout|token)([/?]|$)") {
+        return (pass);
+    }
 }
 
 sub vcl_hit {

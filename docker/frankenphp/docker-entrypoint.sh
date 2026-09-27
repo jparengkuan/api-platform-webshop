@@ -11,8 +11,8 @@ if [ "$1" = 'frankenphp' ]; then
 		exit 1
 	fi
 
-	# The key pair lives in a volume: generated on the first start, reused afterwards.
-	bin/console lexik:jwt:generate-keypair --skip-if-exists --no-interaction
+	# The OAuth2 signing key pair lives in a volume: generated on the first start, reused afterwards.
+	bin/console app:oauth:generate-keys --skip-if-exists --no-interaction
 
 	echo 'Waiting for the database...'
 	attempts=60

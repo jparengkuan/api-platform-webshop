@@ -629,7 +629,7 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *         }>,
  *     },
  *     rate_limiter?: bool|array{ // Rate limiter configuration
- *         enabled?: bool|Param, // Default: false
+ *         enabled?: bool|Param, // Default: true
  *         limiters?: array<string, array{ // Default: []
  *             lock_factory?: scalar|Param|null, // The service ID of the lock factory used by this limiter (or null to disable locking). // Default: "auto"
  *             cache_pool?: scalar|Param|null, // The cache pool to use for storing the current limiter state. // Default: "cache.rate_limiter"
@@ -787,9 +787,6 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *             property?: scalar|Param|null, // Default: null
  *             manager_name?: scalar|Param|null, // Default: null
  *         },
- *         lexik_jwt?: array{
- *             class?: scalar|Param|null, // Default: "Lexik\\Bundle\\JWTAuthenticationBundle\\Security\\User\\JWTUser"
- *         },
  *     }>,
  *     firewalls?: array<string, array{ // Default: []
  *         pattern?: scalar|Param|null,
@@ -848,10 +845,7 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *             provider?: scalar|Param|null,
  *             user?: scalar|Param|null, // Default: "REMOTE_USER"
  *         },
- *         jwt?: array{
- *             provider?: scalar|Param|null, // Default: null
- *             authenticator?: scalar|Param|null, // Default: "lexik_jwt_authentication.security.jwt_authenticator"
- *         },
+ *         oauth2?: array<mixed>,
  *         login_link?: array{
  *             check_route?: scalar|Param|null, // Route that will validate the login link - e.g. "app_login_link_verify".
  *             check_post_only?: scalar|Param|null, // If true, only HTTP POST requests to "check_route" will be handled by the authenticator. // Default: false
@@ -1592,91 +1586,6 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *     generate_final_classes?: bool|Param, // Default: true
  *     generate_final_entities?: bool|Param, // Default: false
  * }
- * @psalm-type LexikJwtAuthenticationConfig = array{
- *     public_key?: scalar|Param|null, // The key used to sign tokens (useless for HMAC). If not set, the key will be automatically computed from the secret key. // Default: null
- *     additional_public_keys?: list<scalar|Param|null>,
- *     secret_key?: scalar|Param|null, // The key used to sign tokens. It can be a raw secret (for HMAC), a raw RSA/ECDSA key or the path to a file itself being plaintext or PEM. // Default: null
- *     pass_phrase?: scalar|Param|null, // The key passphrase (useless for HMAC) // Default: ""
- *     token_ttl?: scalar|Param|null, // Default: 3600
- *     allow_no_expiration?: bool|Param, // Allow tokens without "exp" claim (i.e. indefinitely valid, no lifetime) to be considered valid. Caution: usage of this should be rare. // Default: false
- *     clock_skew?: scalar|Param|null, // Default: 0
- *     encoder?: array{
- *         service?: scalar|Param|null, // Default: "lexik_jwt_authentication.encoder.lcobucci"
- *         signature_algorithm?: scalar|Param|null, // Default: "RS256"
- *     },
- *     user_id_claim?: scalar|Param|null, // Default: "username"
- *     token_extractors?: array{
- *         authorization_header?: bool|array{
- *             enabled?: bool|Param, // Default: true
- *             prefix?: scalar|Param|null, // Default: "Bearer"
- *             name?: scalar|Param|null, // Default: "Authorization"
- *         },
- *         cookie?: bool|array{
- *             enabled?: bool|Param, // Default: false
- *             name?: scalar|Param|null, // Default: "BEARER"
- *         },
- *         query_parameter?: bool|array{
- *             enabled?: bool|Param, // Default: false
- *             name?: scalar|Param|null, // Default: "bearer"
- *         },
- *         split_cookie?: bool|array{
- *             enabled?: bool|Param, // Default: false
- *             cookies?: list<scalar|Param|null>,
- *         },
- *     },
- *     remove_token_from_body_when_cookies_used?: scalar|Param|null, // Default: true
- *     set_cookies?: array<string, array{ // Default: []
- *         lifetime?: scalar|Param|null, // The cookie lifetime. If null, the "token_ttl" option value will be used // Default: null
- *         samesite?: "none"|"lax"|"strict"|Param, // Default: "lax"
- *         path?: scalar|Param|null, // Default: "/"
- *         domain?: scalar|Param|null, // Default: null
- *         secure?: scalar|Param|null, // Default: true
- *         httpOnly?: scalar|Param|null, // Default: true
- *         partitioned?: scalar|Param|null, // Default: false
- *         split?: list<scalar|Param|null>,
- *     }>,
- *     api_platform?: bool|array{ // API Platform compatibility: add check_path in OpenAPI documentation.
- *         enabled?: bool|Param, // Default: false
- *         check_path?: scalar|Param|null, // The login check path to add in OpenAPI. // Default: null
- *         username_path?: scalar|Param|null, // The path to the username in the JSON body. // Default: null
- *         password_path?: scalar|Param|null, // The path to the password in the JSON body. // Default: null
- *     },
- *     access_token_issuance?: bool|array{
- *         enabled?: bool|Param, // Default: false
- *         signature?: array{
- *             algorithm?: scalar|Param|null, // The algorithm use to sign the access tokens.
- *             key?: scalar|Param|null, // The signature key. It shall be JWK encoded.
- *         },
- *         encryption?: bool|array{
- *             enabled?: bool|Param, // Default: false
- *             key_encryption_algorithm?: scalar|Param|null, // The key encryption algorithm is used to encrypt the token.
- *             content_encryption_algorithm?: scalar|Param|null, // The key encryption algorithm is used to encrypt the token.
- *             key?: scalar|Param|null, // The encryption key. It shall be JWK encoded.
- *         },
- *     },
- *     access_token_verification?: bool|array{
- *         enabled?: bool|Param, // Default: false
- *         signature?: array{
- *             header_checkers?: list<scalar|Param|null>,
- *             claim_checkers?: list<scalar|Param|null>,
- *             mandatory_claims?: list<scalar|Param|null>,
- *             allowed_algorithms?: list<scalar|Param|null>,
- *             keyset?: scalar|Param|null, // The signature keyset. It shall be JWKSet encoded.
- *         },
- *         encryption?: bool|array{
- *             enabled?: bool|Param, // Default: false
- *             continue_on_decryption_failure?: bool|Param, // If enable, non-encrypted tokens or tokens that failed during decryption or verification processes are accepted. // Default: false
- *             header_checkers?: list<scalar|Param|null>,
- *             allowed_key_encryption_algorithms?: list<scalar|Param|null>,
- *             allowed_content_encryption_algorithms?: list<scalar|Param|null>,
- *             keyset?: scalar|Param|null, // The encryption keyset. It shall be JWKSet encoded.
- *         },
- *     },
- *     blocklist_token?: bool|array{
- *         enabled?: bool|Param, // Default: false
- *         cache?: scalar|Param|null, // Storage to track blocked tokens // Default: "cache.app"
- *     },
- * }
  * @psalm-type ZenstruckFoundryConfig = array{
  *     auto_refresh_proxies?: bool|Param|null, // Deprecated: Since 2.0 auto_refresh_proxies defaults to true and this configuration has no effect. // Whether to auto-refresh proxies by default (https://symfony.com/bundles/ZenstruckFoundryBundle/current/index.html#auto-refresh) // Default: null
  *     enable_auto_refresh_with_lazy_objects?: bool|Param|null, // Enable auto-refresh using PHP 8.4 lazy objects (cannot be enabled if PHP < 8.4). // Default: null
@@ -1721,6 +1630,60 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *         default_namespace?: scalar|Param|null, // Default namespace where stories will be created by maker. // Default: "Story"
  *     },
  * }
+ * @psalm-type LeagueOauth2ServerConfig = array{
+ *     authorization_server?: array{
+ *         private_key?: scalar|Param|null, // Full path to the private key file. How to generate a private key: https://oauth2.thephpleague.com/installation/#generating-public-and-private-keys
+ *         private_key_passphrase?: scalar|Param|null, // Passphrase of the private key, if any // Default: null
+ *         encryption_key?: scalar|Param|null, // The plain string or the ascii safe string used to create a Defuse\Crypto\Key to be used as an encryption key. How to generate an encryption key: https://oauth2.thephpleague.com/installation/#string-password
+ *         encryption_key_type?: scalar|Param|null, // The type of value of 'encryption_key' Should be either 'plain' or 'defuse' // Default: "plain"
+ *         access_token_ttl?: scalar|Param|null, // How long the issued access token should be valid for. The value should be a valid interval: http://php.net/manual/en/dateinterval.construct.php#refsect1-dateinterval.construct-parameters // Default: "PT1H"
+ *         refresh_token_ttl?: scalar|Param|null, // How long the issued refresh token should be valid for. The value should be a valid interval: http://php.net/manual/en/dateinterval.construct.php#refsect1-dateinterval.construct-parameters // Default: "P1M"
+ *         auth_code_ttl?: scalar|Param|null, // How long the issued auth code should be valid for. The value should be a valid interval: http://php.net/manual/en/dateinterval.construct.php#refsect1-dateinterval.construct-parameters // Default: "PT10M"
+ *         device_code_ttl?: scalar|Param|null, // How long the issued device code should be valid for. The value should be a valid interval: http://php.net/manual/en/dateinterval.construct.php#refsect1-dateinterval.construct-parameters // Default: "PT10M"
+ *         enable_client_credentials_grant?: bool|Param, // Whether to enable the client credentials grant // Default: true
+ *         enable_password_grant?: bool|Param, // Whether to enable the password grant
+ *         enable_refresh_token_grant?: bool|Param, // Whether to enable the refresh token grant // Default: true
+ *         enable_auth_code_grant?: bool|Param, // Whether to enable the authorization code grant // Default: true
+ *         require_code_challenge_for_public_clients?: bool|Param, // Whether to require code challenge for public clients for the auth code grant // Default: true
+ *         enable_implicit_grant?: bool|Param, // Whether to enable the implicit grant
+ *         persist_access_token?: bool|Param, // Whether to enable access token saving to persistence layer // Default: true
+ *         response_type_class?: scalar|Param|null, // Define a custom ResponseType // Default: null
+ *         revoke_refresh_tokens?: bool|Param, // Whether to revoke refresh tokens after they were used for all grant types // Default: true
+ *         enable_device_code_grant?: bool|Param, // Whether to enable the device code grant // Default: false
+ *         device_code_verification_uri?: scalar|Param|null, // The full URI the user will need to visit to enter the user code // Default: ""
+ *         enable_device_code_verification_uri_complete_generation?: bool|Param, // Whether to enable the generation of verification_uri_complete // Default: true
+ *         device_code_polling_interval?: scalar|Param|null, // How soon (in seconds) can the device code be used to poll for the access token without being throttled // Default: 5
+ *         enable_device_code_polling_interval_visibility?: bool|Param, // Whether to enable the visibility of polling interval // Default: true
+ *     },
+ *     resource_server?: array{
+ *         public_key?: scalar|Param|null, // Full path to the public key file How to generate a public key: https://oauth2.thephpleague.com/installation/#generating-public-and-private-keys
+ *         jwt_leeway?: scalar|Param|null, // The leeway in seconds to allow for clock skew in JWT verification. Default PT0S (no leeway). // Default: null
+ *     },
+ *     scopes?: array{
+ *         available?: list<scalar|Param|null>,
+ *         default?: list<scalar|Param|null>,
+ *     },
+ *     persistence?: array{ // Configures different persistence methods that can be used by the bundle for saving client and token data. Only one persistence method can be configured at a time.
+ *         doctrine?: array{
+ *             entity_manager?: scalar|Param|null, // Name of the entity manager that you wish to use for managing clients and tokens. // Default: "default"
+ *             table_prefix?: scalar|Param|null, // Table name prefix. // Default: "oauth2_"
+ *         },
+ *         in_memory?: scalar|Param|null,
+ *         custom?: array{
+ *             access_token_manager?: scalar|Param|null, // Service id of the custom access token manager
+ *             authorization_code_manager?: scalar|Param|null, // Service id of the custom authorization code manager
+ *             client_manager?: scalar|Param|null, // Service id of the custom client manager
+ *             refresh_token_manager?: scalar|Param|null, // Service id of the custom refresh token manager
+ *             device_code_manager?: scalar|Param|null, // Service id of the custom device code manager
+ *             credentials_revoker?: scalar|Param|null, // Service id of the custom credentials revoker
+ *         },
+ *     },
+ *     client?: array{
+ *         classname?: scalar|Param|null, // Set a custom client class. Must be a League\Bundle\OAuth2ServerBundle\Model\AbstractClient // Default: "League\\Bundle\\OAuth2ServerBundle\\Model\\Client"
+ *         allow_plaintext_secrets?: bool|Param, // Whether to allow plaintext client secrets. // Default: true
+ *     },
+ *     role_prefix?: scalar|Param|null, // Set a custom prefix that replaces the default 'ROLE_OAUTH2_' role prefix // Default: "ROLE_OAUTH2_"
+ * }
  * @psalm-type ConfigType = array{
  *     imports?: ImportsConfig,
  *     parameters?: ParametersConfig,
@@ -1732,7 +1695,7 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *     doctrine_migrations?: DoctrineMigrationsConfig,
  *     nelmio_cors?: NelmioCorsConfig,
  *     api_platform?: ApiPlatformConfig,
- *     lexik_jwt_authentication?: LexikJwtAuthenticationConfig,
+ *     league_oauth2_server?: LeagueOauth2ServerConfig,
  *     "when@dev"?: array{
  *         imports?: ImportsConfig,
  *         parameters?: ParametersConfig,
@@ -1745,8 +1708,8 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *         nelmio_cors?: NelmioCorsConfig,
  *         api_platform?: ApiPlatformConfig,
  *         maker?: MakerConfig,
- *         lexik_jwt_authentication?: LexikJwtAuthenticationConfig,
  *         zenstruck_foundry?: ZenstruckFoundryConfig,
+ *         league_oauth2_server?: LeagueOauth2ServerConfig,
  *     },
  *     "when@prod"?: array{
  *         imports?: ImportsConfig,
@@ -1759,7 +1722,7 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *         doctrine_migrations?: DoctrineMigrationsConfig,
  *         nelmio_cors?: NelmioCorsConfig,
  *         api_platform?: ApiPlatformConfig,
- *         lexik_jwt_authentication?: LexikJwtAuthenticationConfig,
+ *         league_oauth2_server?: LeagueOauth2ServerConfig,
  *     },
  *     "when@test"?: array{
  *         imports?: ImportsConfig,
@@ -1772,8 +1735,8 @@ use Symfony\Component\Config\Loader\ParamConfigurator as Param;
  *         doctrine_migrations?: DoctrineMigrationsConfig,
  *         nelmio_cors?: NelmioCorsConfig,
  *         api_platform?: ApiPlatformConfig,
- *         lexik_jwt_authentication?: LexikJwtAuthenticationConfig,
  *         zenstruck_foundry?: ZenstruckFoundryConfig,
+ *         league_oauth2_server?: LeagueOauth2ServerConfig,
  *     },
  *     ...<string, ExtensionType|array{ // extra keys must follow the when@%env% pattern or match an extension alias
  *         imports?: ImportsConfig,

@@ -91,16 +91,17 @@ jobs:
       APP_ENV: test
       # Doctrine appends "_test" to the database name in the test environment.
       DATABASE_URL: postgresql://app:app@127.0.0.1:5432/app?serverVersion=17&charset=utf8
-      # Throwaway key pair generated below; this passphrase protects nothing outside this job.
-      JWT_PASSPHRASE: ci-only-passphrase
+      # Throwaway OAuth2 key pair generated below; these values protect nothing outside this job.
+      OAUTH_PASSPHRASE: ci-only-passphrase
+      OAUTH_ENCRYPTION_KEY: ci-only-encryption-key
 
     steps:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-php
 
-      - name: Generate JWT key pair
-        run: bin/console lexik:jwt:generate-keypair --no-interaction
+      - name: Generate OAuth2 key pair
+        run: bin/console app:oauth:generate-keys --no-interaction
 
       - name: Create the test database
         run: |

@@ -5,6 +5,12 @@ api_platform:
     formats:
         jsonld: ['application/ld+json']
         json: ['application/json']
+    # Swagger UI's "Authorize" button: paste "Bearer <access token>" from the OAuth2 flow.
+    swagger:
+        api_keys:
+            access_token:
+                name: Authorization
+                type: header
     defaults:
         stateless: true
         cache_headers:

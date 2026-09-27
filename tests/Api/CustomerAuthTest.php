@@ -4,11 +4,12 @@ namespace App\Tests\Api;
 
 use ApiPlatform\Test\ApiTestCase;
 use ApiPlatform\Test\Client;
-use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
 final class CustomerAuthTest extends ApiTestCase
 {
+    use WebshopTestTrait;
+
     protected static ?bool $alwaysBootKernel = true;
 
     private const string PASSWORD = 'S3cure-webshop-pass!';
@@ -16,14 +17,12 @@ final class CustomerAuthTest extends ApiTestCase
     private Client $client;
 
     /**
-     * Creates an API client and starts every test with an empty customer table.
+     * Creates an API client and starts every test with an empty database.
      */
     protected function setUp(): void
     {
         $this->client = self::createClient();
-        self::getContainer()->get(EntityManagerInterface::class)
-            ->getConnection()
-            ->executeStatement('TRUNCATE customer CASCADE');
+        $this->resetDatabase();
     }
 
     /**
@@ -66,9 +65,9 @@ final class CustomerAuthTest extends ApiTestCase
     }
 
     /**
-     * A JWT from the login endpoint gives access to the customer's own profile.
+     * A newly registered customer can log in through the OAuth2 flow and read their own profile.
      */
-    public function testLoginReturnsTokenThatGrantsAccessToMe(): void
+    public function testRegisteredCustomerCanLogInAndReadProfile(): void
     {
         $this->register('jan@example.com');
 
@@ -77,18 +76,6 @@ final class CustomerAuthTest extends ApiTestCase
         $this->client->request('GET', '/api/me', ['auth_bearer' => $token]);
         self::assertResponseIsSuccessful();
         self::assertJsonContains(['email' => 'jan@example.com', 'firstName' => 'Jan']);
-    }
-
-    /**
-     * Logging in with a wrong password is refused.
-     */
-    public function testLoginWithWrongPasswordFails(): void
-    {
-        $this->register('jan@example.com');
-
-        $this->client->request('POST', '/api/login', ['json' => ['email' => 'jan@example.com', 'password' => 'wrong-password']]);
-
-        self::assertResponseStatusCodeSame(401);
     }
 
     /**
@@ -118,7 +105,7 @@ final class CustomerAuthTest extends ApiTestCase
     }
 
     /**
-     * Registers a customer through the API with the shared test password.
+     * Registers a customer through the API with this test's password.
      */
     private function register(string $email): ResponseInterface
     {
@@ -128,16 +115,5 @@ final class CustomerAuthTest extends ApiTestCase
             'lastName' => 'Jansen',
             'plainPassword' => self::PASSWORD,
         ]]);
-    }
-
-    /**
-     * Logs in through the API and returns the JWT.
-     */
-    private function login(string $email, string $password): string
-    {
-        $response = $this->client->request('POST', '/api/login', ['json' => ['email' => $email, 'password' => $password]]);
-        self::assertResponseIsSuccessful();
-
-        return $response->toArray()['token'];
     }
 }

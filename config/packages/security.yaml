@@ -15,31 +15,35 @@ security:
             # Ensure dev tools and static assets are always allowed
             pattern: ^/(_profiler|_wdt|assets|build)/
             security: false
-        # POST /api/login with {"email", "password"} returns {"token": "<JWT>"}
-        login:
-            pattern: ^/api/login$
-            stateless: true
-            provider: app_customer_provider
-            json_login:
-                check_path: api_login
-                username_path: email
-                password_path: password
-                success_handler: lexik_jwt_authentication.handler.authentication_success
-                failure_handler: lexik_jwt_authentication.handler.authentication_failure
-        # Everything else under /api authenticates with "Authorization: Bearer <JWT>"
+        # The API only accepts OAuth2 access tokens: "Authorization: Bearer <access token>".
         api:
             pattern: ^/api
             stateless: true
             provider: app_customer_provider
-            jwt: ~
+            oauth2: true
+        # The OAuth2 authorization flow: /authorize requires a logged-in user, who logs in on the
+        # login page with email and password (session-based, only for this flow). /token is
+        # handled by the OAuth2 server, which authenticates the client itself.
         main:
             lazy: true
             provider: app_customer_provider
+            form_login:
+                login_path: app_login
+                check_path: app_login
+                username_parameter: email
+                password_parameter: password
+                enable_csrf: true
+            login_throttling:
+                max_attempts: 5
+                interval: '15 minutes'
+            logout:
+                path: app_logout
 
     # Note: Only the *first* matching rule is applied.
     # Access per endpoint is set with `security:` on the API Platform operations.
     access_control:
-        - { path: ^/api/(login|register)$, roles: PUBLIC_ACCESS }
+        - { path: ^/authorize, roles: IS_AUTHENTICATED_FULLY }
+        - { path: ^/api/register$, roles: PUBLIC_ACCESS }
         - { path: ^/api/docs, roles: PUBLIC_ACCESS }
 
 when@test:

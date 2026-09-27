@@ -35,11 +35,6 @@ desktop.ini
 /var/
 /vendor/
 ###< symfony/framework-bundle ###
-
-###> lexik/jwt-authentication-bundle ###
-/config/jwt/*.pem
-###< lexik/jwt-authentication-bundle ###
-
 ###> phpunit/phpunit ###
 /phpunit.xml
 /.phpunit.cache/
@@ -49,3 +44,7 @@ desktop.ini
 /.php-cs-fixer.php
 /.php-cs-fixer.cache
 ###< friendsofphp/php-cs-fixer ###
+
+###> league/oauth2-server-bundle ###
+/config/jwt/*.pem
+###< league/oauth2-server-bundle ###

@@ -8,6 +8,14 @@ framework:
     #esi: true
     #fragments: true
 
+when@prod:
+    framework:
+        # The app is only reachable through the platform's TLS proxy and Varnish, on the private Docker
+        # network. Trusting their X-Forwarded-* headers makes Symfony see HTTPS and the real client IP:
+        # needed for correct redirect URLs in the login flow, Secure cookies and login throttling.
+        trusted_proxies: 'private_ranges'
+        trusted_headers: ['x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port']
+
 when@test:
     framework:
         test: true

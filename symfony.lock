@@ -61,16 +61,17 @@
             ".php-cs-fixer.dist.php"
         ]
     },
-    "lexik/jwt-authentication-bundle": {
-        "version": "3.2",
+    "league/oauth2-server-bundle": {
+        "version": "1.2",
         "recipe": {
             "repo": "github.com/symfony/recipes",
             "branch": "main",
-            "version": "2.5",
-            "ref": "e9481b233a11ef7e15fe055a2b21fd3ac1aa2bb7"
+            "version": "1.2",
+            "ref": "374de24b3639ca6802e0b4f000fe2a56428f95a3"
         },
         "files": [
-            "config/packages/lexik_jwt_authentication.yaml"
+            "config/packages/league_oauth2_server.yaml",
+            "config/routes/league_oauth2_server.yaml"
         ]
     },
     "nelmio/cors-bundle": {
@@ -83,6 +84,18 @@
         },
         "files": [
             "config/packages/nelmio_cors.yaml"
+        ]
+    },
+    "nyholm/psr7": {
+        "version": "1.8",
+        "recipe": {
+            "repo": "github.com/symfony/recipes",
+            "branch": "main",
+            "version": "1.0",
+            "ref": "4a8c0345442dcca1d8a2c65633dcf0285dd5a5a2"
+        },
+        "files": [
+            "config/packages/nyholm_psr7.yaml"
         ]
     },
     "phpstan/phpstan": {

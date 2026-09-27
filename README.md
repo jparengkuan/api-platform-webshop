@@ -3,8 +3,8 @@
 [![CI](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml)
 
 A REST/JSON-LD API for a simple webshop, built with **Symfony 8.1** and **API Platform 5**.
-Customers can register, log in with a JWT, browse the catalog and place an order.
-Administrators maintain the product catalog.
+Customers can register, log in through an OAuth2 client application, browse the catalog and place
+an order. Administrators maintain the product catalog.
 
 The code follows the [Symfony best practices](https://symfony.com/doc/current/best_practices.html),
 the SOLID principles and a set of targeted design patterns (see [Architecture](#architecture)).
@@ -16,6 +16,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 - [Features](#features)
 - [Tech stack](#tech-stack)
 - [Installation](#installation)
+- [Authentication (OAuth2)](#authentication-oauth2)
 - [Using the API](#using-the-api)
 - [Architecture](#architecture)
 - [Business rules](#business-rules)
@@ -33,7 +34,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 
 | Area      | What it does                                                                        |
 |-----------|-------------------------------------------------------------------------------------|
-| Customers | Register, log in (JWT), view own profile                                            |
+| Customers | Register; log in with email and password through a registered OAuth2 client app; view own profile |
 | Catalog   | Browse products (public), filter by category; manage products and categories (admin only) |
 | Orders    | Place an order with one or more lines; view own orders; admins see all orders       |
 | Stock     | Reserved when an order is placed, safe under concurrent orders                      |
@@ -46,7 +47,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Framework        | Symfony 8.1                                                      |
 | API              | API Platform 5 (JSON-LD/Hydra, OpenAPI)                          |
 | Database         | PostgreSQL 17 via Doctrine ORM 3 and Doctrine Migrations         |
-| Authentication   | LexikJWTAuthenticationBundle (stateless, `Bearer` token)         |
+| Authentication   | OAuth2 Authorization Code + PKCE (`league/oauth2-server-bundle`); JWT access tokens, refresh tokens |
 | Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17)      |
 | Production       | Docker: FrankenPHP (worker mode) behind Varnish 8, with tag-based cache invalidation |
 | Tests            | PHPUnit 13, `api-platform/test`                                  |
@@ -74,23 +75,18 @@ ddev start
 # 2. Install dependencies
 ddev composer install
 
-# 3. Set the JWT passphrase (pick your own long random value)
-#    .env.local is used in dev, .env.test.local in the test environment.
-#    Both need the same passphrase, because they share the same key pair.
-echo 'JWT_PASSPHRASE=pick-a-long-random-value' >> .env.local
-echo 'JWT_PASSPHRASE=pick-a-long-random-value' >> .env.test.local
+# 3. Generate the key pair that signs OAuth2 access tokens (config/jwt/*.pem, git-ignored).
+#    It's encrypted with OAUTH_PASSPHRASE; the dev default in .env is fine locally.
+ddev exec bin/console app:oauth:generate-keys
 
-# 4. Generate the key pair used to sign tokens (config/jwt/*.pem)
-ddev exec bin/console lexik:jwt:generate-keypair
-
-# 5. Create the database schema
+# 4. Create the database schema
 ddev exec bin/console doctrine:migrations:migrate --no-interaction
 
-# 6. Create the test database (Doctrine appends the _test suffix automatically)
+# 5. Create the test database (Doctrine appends the _test suffix automatically)
 ddev exec bin/console doctrine:database:create --env=test --if-not-exists
 ddev exec bin/console doctrine:migrations:migrate --env=test --no-interaction
 
-# 7. Optional: fill the dev database with realistic test data
+# 6. Fill the dev database with realistic test data, including a demo OAuth2 client
 ddev composer fixtures
 ```
 
@@ -105,9 +101,9 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 | Variable             | Meaning                                                          |
 |----------------------|------------------------------------------------------------------|
 | `DATABASE_URL`       | PostgreSQL connection; DDEV sets this automatically              |
-| `JWT_SECRET_KEY`     | Path to the private key (`config/jwt/private.pem`)               |
-| `JWT_PUBLIC_KEY`     | Path to the public key (`config/jwt/public.pem`)                 |
-| `JWT_PASSPHRASE`     | Passphrase of the private key: **never commit it to `.env`**     |
+| `OAUTH_PRIVATE_KEY` / `OAUTH_PUBLIC_KEY` | Key pair that signs and verifies access tokens (`config/jwt/*.pem`) |
+| `OAUTH_PASSPHRASE`   | Encrypts the private key. The value in `.env` is a dev default; production sets its own |
+| `OAUTH_ENCRYPTION_KEY` | Encrypts authorization codes and refresh tokens. Dev default in `.env`; production sets its own |
 | `CORS_ALLOW_ORIGIN`  | Regex of allowed origins for browser clients                     |
 | `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
@@ -117,6 +113,7 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 
 | What        | Amount | Details                                                                  |
 |-------------|--------|--------------------------------------------------------------------------|
+| OAuth2 client | 1    | `webshop-demo`, secret `demo-secret`, redirect URI `http://localhost:3000/callback` |
 | Accounts    | 2      | `admin@example.com` (admin) and `klant@example.com` (customer)           |
 | Customers   | 50     | Dutch names; the email matches the name (`floris.devries123@gmail.com`)  |
 | Categories  | 6      | Accessoires, Audio, Kantoor, Kleding, Mokken & flessen, Tassen           |
@@ -154,7 +151,81 @@ ddev exec bin/console dbal:run-sql \
   "UPDATE customer SET roles = '[\"ROLE_ADMIN\"]' WHERE email = 'admin@example.com'"
 ```
 
-Then log in again; the roles are stored in the token.
+The new role applies to the next request: the API loads the user (and their roles) from the
+database for every access token.
+
+---
+
+## Authentication (OAuth2)
+
+The API is an **OAuth2 authorization server** and **resource server**. Users only log in through a
+**registered client application** (e.g. your server-side frontend), with the **Authorization Code
+grant and PKCE**: they type their email and password on the API's own login page, never in the
+client application.
+
+```
+Client app (server-side)           API                                     User's browser
+────────────────────────           ───                                     ──────────────
+1. redirect to /authorize ─────────────────────────────────────────────────▶ GET /authorize?…
+                                   not logged in → 302 /login ◀────────────
+                                   login page (email + password) ◀────────── POST /login
+                                   logged in → 302 back to /authorize ─────▶
+                                   PKCE OK → 302 redirect_uri?code=…&state=… ▶ callback
+2. POST /token (code + client secret + PKCE verifier)
+   ◀── { access_token (1 h), refresh_token (1 month) }
+3. GET /api/…  Authorization: Bearer <access_token>
+```
+
+| Rule                                              | Why                                                      |
+|---------------------------------------------------|----------------------------------------------------------|
+| Only the Authorization Code and Refresh Token grants are enabled | No password, implicit or client-credentials grant: the password is only ever entered on the API |
+| PKCE with `S256` is required for **every** client | OAuth 2.1; the server itself only enforces it for public clients, `AuthorizationRequestListener` does it for all |
+| Redirect URIs must be registered exactly          | Codes can't be sent to another site                       |
+| Clients are registered by an administrator only   | So they're trusted: no consent screen                     |
+| Login form: CSRF token, 5 attempts per 15 minutes | Against forged logins and password guessing (`login_throttling`) |
+| Access token: 1 hour, JWT signed with RS256       | The API verifies it with the public key and loads the user and roles from the database on every request |
+| Refresh token: 1 month, rotated on every use      | A new access token without logging in again               |
+| No `/api/login` anymore                           | The only way to a token is `/token`                       |
+
+### Endpoints
+
+| Method   | Path         | Purpose                                                                       |
+|----------|--------------|-------------------------------------------------------------------------------|
+| GET      | `/authorize` | Start of the flow: `response_type=code`, `client_id`, `redirect_uri`, `scope=api`, `state`, `code_challenge`, `code_challenge_method=S256` |
+| GET/POST | `/login`     | Login page (email + password); `/authorize` sends users here                   |
+| GET      | `/logout`    | Ends the login session on the API                                             |
+| POST     | `/token`     | `grant_type=authorization_code` (with `code`, `redirect_uri`, `code_verifier`) or `grant_type=refresh_token` (with `refresh_token`); always with `client_id` and `client_secret` |
+
+### Registering a client
+
+```bash
+ddev exec bin/console league:oauth2-server:create-client "My frontend" my-frontend \
+  --redirect-uri=https://www.example.com/callback \
+  --grant-type=authorization_code --grant-type=refresh_token --scope=api
+```
+
+The command prints the generated secret **once** (it's stored hashed). The dev fixtures already
+contain a demo client: `webshop-demo` / `demo-secret`, redirect URI `http://localhost:3000/callback`.
+
+### Trying the flow by hand
+
+```bash
+API=https://api-platform.ddev.site
+VERIFIER=$(openssl rand -hex 32)
+CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -binary -sha256 | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+# 1. Open this URL in a browser, log in as klant@example.com / password
+echo "$API/authorize?response_type=code&client_id=webshop-demo&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&scope=api&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256"
+
+# 2. The browser ends on http://localhost:3000/callback?code=…&state=xyz (nothing runs there;
+#    copy the code from the address bar) and exchange it for tokens:
+curl -X POST $API/token \
+  -d grant_type=authorization_code -d client_id=webshop-demo -d client_secret=demo-secret \
+  --data-urlencode redirect_uri=http://localhost:3000/callback \
+  --data-urlencode code=<code> -d code_verifier=$VERIFIER
+```
+
+In Swagger UI (`/api/docs`), click **Authorize** and paste `Bearer <access_token>`.
 
 ---
 
@@ -168,8 +239,7 @@ plain JSON (`application/json`) works too. Relations are referenced by **IRI**, 
 
 | Method  | Path                    | Access                  | Description                                    |
 |---------|-------------------------|-------------------------|------------------------------------------------|
-| POST    | `/api/register`         | public                  | Create a customer account                      |
-| POST    | `/api/login`            | public                  | Log in; returns `{"token": "<JWT>"}`           |
+| POST    | `/api/register`         | public                  | Create a customer account (logging in: see [Authentication](#authentication-oauth2)) |
 | GET     | `/api/me`               | authenticated           | Profile of the logged-in customer              |
 | GET     | `/api/customers/{id}`   | owner or admin          | Get a customer                                 |
 | GET     | `/api/categories`       | public                  | All categories, sorted by name (not paginated) |
@@ -198,9 +268,8 @@ curl -X POST $API/register -H 'Content-Type: application/json' -d '{
   "plainPassword": "S3cure-webshop-pass!"
 }'
 
-# Log in and keep the token
-TOKEN=$(curl -s -X POST $API/login -H 'Content-Type: application/json' \
-  -d '{"email": "jan@example.com", "password": "S3cure-webshop-pass!"}' | jq -r .token)
+# Log in through the OAuth2 flow (see "Authentication") and keep the access token
+TOKEN=<access_token>
 
 # Browse the catalog, or only one category
 curl $API/products
@@ -387,8 +456,14 @@ Example of a broken business rule:
 
 ## Security
 
-- **Stateless JWT:** `POST /api/login` (firewall `login`, `json_login`) returns a token. All other
-  `/api` routes read the token from the `Authorization: Bearer …` header (firewall `api`).
+- **OAuth2 only:** tokens come exclusively from `/token`, for registered clients, through the
+  Authorization Code grant with PKCE (see [Authentication](#authentication-oauth2)). Every `/api`
+  route reads the access token from the `Authorization: Bearer …` header (stateless firewall `api`,
+  `oauth2: true`). The login page uses a separate, session-based firewall (`main`) with CSRF
+  protection and login throttling.
+- **Behind proxies:** in production Symfony trusts `X-Forwarded-*` from the private network (the TLS
+  proxy and Varnish), so it sees HTTPS: redirects stay on `https://` and the session cookie is
+  `Secure`, `HttpOnly`, `SameSite=Lax`.
 - **Authorization per operation:** through `security:` expressions in the `#[ApiResource]`
   attributes, for example `is_granted('ROLE_ADMIN') or (is_granted('ROLE_USER') and object.isPlacedBy(user))`.
 - **Collections:** `CurrentCustomerOrdersExtension` limits the order list to the customer's own
@@ -398,7 +473,8 @@ Example of a broken business rule:
   (`PasswordUpgraderInterface`). On registration the password is checked against known data
   breaches (`NotCompromisedPassword`). The plain-text password is never stored or returned.
 - **Identifiers:** UUID v7, so they can't be guessed or enumerated.
-- **Secrets:** private keys (`config/jwt/*.pem`) and `.env.*.local` are git-ignored.
+- **Secrets:** the OAuth2 signing keys (`config/jwt/*.pem`) and `.env.*.local` are git-ignored;
+  client secrets are stored hashed.
 
 ---
 
@@ -438,7 +514,8 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 |--------------------------------|-------------------------|------------------------------------------------------------|
 | `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots        |
-| `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, login, access to profiles                    |
+| `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
+| `tests/Api/OAuthTest`          | Functional (HTTP)       | Authorization Code flow, PKCE, redirect URIs, client secret, refresh tokens, disabled grants |
 | `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, category filters, admin management, validation, JSON schema |
 | `tests/Api/CategoryTest`       | Functional (HTTP)       | Public list, slugs, uniqueness, admin-only, delete protection |
 | `tests/Api/HttpCacheTest`      | Functional (HTTP)       | Cache headers, cache tags, invalidation on changes and orders |
@@ -447,7 +524,8 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
 tables before every test. They create their data with the same Foundry factories as the dev
 fixtures. `tests/Api/WebshopTestTrait.php` wraps them so each test pins down exactly what it relies on
-(SKU, price, stock, active) and leaves the rest random. The login helpers live there too.
+(SKU, price, stock, active) and leaves the rest random. Its `login()` helper runs the real OAuth2
+flow, exactly like a client application: `/authorize` → login page → callback with a code → `/token`.
 Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 
 ### Static analysis
@@ -486,7 +564,8 @@ curl http://127.0.0.1:8080/api/products     # through Varnish, from the server i
 | Variable                   | Meaning                                                               |
 |----------------------------|-----------------------------------------------------------------------|
 | `APP_SECRET`               | Symfony secret, e.g. `openssl rand -hex 32`                           |
-| `JWT_PASSPHRASE`           | Protects the JWT private key, e.g. `openssl rand -hex 32`              |
+| `OAUTH_PASSPHRASE`         | Encrypts the OAuth2 signing key, e.g. `openssl rand -hex 32`. Never change it afterwards |
+| `OAUTH_ENCRYPTION_KEY`     | Encrypts authorization codes and refresh tokens, e.g. `openssl rand -hex 32` |
 | `POSTGRES_PASSWORD`        | Database password (`POSTGRES_DB`/`POSTGRES_USER` default to `app`)    |
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
@@ -544,7 +623,8 @@ production.
 The entrypoint of the app container (`docker/frankenphp/docker-entrypoint.sh`) runs before the web
 server starts:
 
-1. Generates the JWT key pair on the first start (stored in the `jwt_keys` volume, reused afterwards).
+1. Generates the OAuth2 signing key pair on the first start (`app:oauth:generate-keys`, stored in the
+   `jwt_keys` volume, reused afterwards).
 2. Waits until PostgreSQL accepts connections.
 3. With `RESET_DEMO_DATA=1` only: drops all tables.
 4. Runs the migrations (`--all-or-nothing`: a failing migration changes nothing).
@@ -566,7 +646,8 @@ then Varnish.
 | VCL baked into the Varnish image (`docker/varnish/Dockerfile`) | Deploying needs no bind mounts            |
 
 Data lives in two named volumes: `database_data` (PostgreSQL) and `jwt_keys`. **Back up
-`database_data`** (e.g. a daily `pg_dump`); the JWT keys are regenerated if lost (users log in again).
+`database_data`** (e.g. a daily `pg_dump`); it also holds the OAuth2 clients and refresh tokens.
+The signing keys are regenerated if lost (users then log in again).
 
 Run a console command in production:
 
@@ -588,7 +669,9 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 ├── migrations/              Doctrine migrations (never change the schema by hand)
 ├── src/
 │   ├── ApiResource/         Shared API settings (HTTP cache headers)
-│   ├── Controller/          LoginController (route for the json_login firewall)
+│   ├── Command/             Console commands (app:oauth:generate-keys)
+│   ├── Controller/          SecurityController: the login page of the OAuth2 flow
+│   ├── EventListener/       AuthorizationRequestListener: approves /authorize requests with PKCE
 │   ├── Doctrine/            API Platform query extensions
 │   ├── Dto/                 API input DTOs
 │   ├── Entity/              Doctrine entities and API resources
@@ -600,6 +683,7 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
 │   ├── Repository/          Repository interfaces and Doctrine implementations
 │   ├── State/               API Platform state providers and processors
 │   └── Story/               Foundry story with the full dev data set
+├── templates/security/      The login page
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
 │   ├── Support/             Test doubles (RecordingPurger)
@@ -642,6 +726,9 @@ docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/cons
   (with stock returned) are still to come, for example with the Symfony Workflow component.
 - **Administration:** there is no endpoint or console command to create administrators (the
   fixtures provide `admin@example.com` for development).
+- **OAuth2 consent screen:** every registered client is trusted, so users aren't asked to approve
+  access. Needed before third-party applications may register as clients.
+- **Password reset:** the login page has no "forgot password" flow yet.
 - **Tests use TRUNCATE:** Foundry's `ResetDatabase` trait would rebuild the whole database before
   every test without `dama/doctrine-test-bundle`. That bundle's recipe is in `recipes-contrib`,
   which this project doesn't allow (`allow-contrib: false`). Enabling it would make the test
