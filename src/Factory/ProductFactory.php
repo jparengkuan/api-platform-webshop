@@ -2,11 +2,13 @@
 
 namespace App\Factory;
 
+use App\Entity\Category;
 use App\Entity\Embeddable\Money;
 use App\Entity\Product;
 use Zenstruck\Foundry\Persistence\PersistentObjectFactory;
 
 use function Zenstruck\Foundry\force;
+use function Zenstruck\Foundry\lazy;
 
 /**
  * Creates products that look like a real merchandise shop: typed names, prices ending in ,95
@@ -16,18 +18,18 @@ use function Zenstruck\Foundry\force;
  */
 final class ProductFactory extends PersistentObjectFactory
 {
-    /** Product types with their SKU prefix and price range in cents. */
+    /** Product types with their SKU prefix, price range in cents and category. */
     private const array TYPES = [
-        'Mok' => ['MOK', 800, 1800],
-        'T-shirt' => ['TSH', 1500, 3500],
-        'Hoodie' => ['HOO', 3500, 7500],
-        'Rugzak' => ['RUG', 3000, 12000],
-        'Waterfles' => ['WAT', 1200, 3000],
-        'Notitieboek' => ['NOT', 600, 2000],
-        'Koptelefoon' => ['KOP', 2500, 25000],
-        'Sokken' => ['SOK', 500, 1500],
-        'Pet' => ['PET', 1200, 2800],
-        'Sjaal' => ['SJA', 1500, 4500],
+        'Mok' => ['MOK', 800, 1800, 'Mokken & flessen'],
+        'T-shirt' => ['TSH', 1500, 3500, 'Kleding'],
+        'Hoodie' => ['HOO', 3500, 7500, 'Kleding'],
+        'Rugzak' => ['RUG', 3000, 12000, 'Tassen'],
+        'Waterfles' => ['WAT', 1200, 3000, 'Mokken & flessen'],
+        'Notitieboek' => ['NOT', 600, 2000, 'Kantoor'],
+        'Koptelefoon' => ['KOP', 2500, 25000, 'Audio'],
+        'Sokken' => ['SOK', 500, 1500, 'Kleding'],
+        'Pet' => ['PET', 1200, 2800, 'Accessoires'],
+        'Sjaal' => ['SJA', 1500, 4500, 'Accessoires'],
     ];
 
     private const array COLLECTIONS = ['Amsterdam', 'Utrecht', 'Delft', 'Haarlem', 'Leiden', 'Zwolle', 'Maastricht', 'Groningen'];
@@ -76,13 +78,15 @@ final class ProductFactory extends PersistentObjectFactory
     {
         $faker = self::faker();
         $type = $faker->randomKey(self::TYPES);
-        [$skuPrefix, $minPrice, $maxPrice] = self::TYPES[$type];
+        [$skuPrefix, $minPrice, $maxPrice, $category] = self::TYPES[$type];
         $collection = $faker->randomElement(self::COLLECTIONS);
         $color = $faker->randomElement(self::COLORS);
 
         return [
             'sku' => $skuPrefix.'-'.$faker->unique()->numerify('#####'),
             'name' => sprintf('%s %s, %s', $type, $collection, $color),
+            // Only looked up when the caller doesn't pass a category.
+            'category' => lazy(static fn (): Category => CategoryFactory::findOrCreate(['name' => $category])),
             'description' => sprintf('%s uit de %s-collectie in %s. %s', $type, $collection, $color, $faker->randomElement(self::FEATURES)),
             // Prices like 12,95 and 34,95 instead of arbitrary cents.
             'price' => new Money(intdiv($faker->numberBetween($minPrice, $maxPrice), 100) * 100 + 95, 'EUR'),

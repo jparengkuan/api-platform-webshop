@@ -3,6 +3,7 @@
 namespace App\Tests\Api;
 
 use ApiPlatform\Test\Client;
+use App\Entity\Category;
 use App\Entity\Customer;
 use App\Entity\Embeddable\Money;
 use App\Entity\Product;
@@ -22,7 +23,7 @@ trait WebshopTestTrait
      */
     private function resetDatabase(): void
     {
-        $this->entityManager()->getConnection()->executeStatement('TRUNCATE customer, product, customer_order, order_line CASCADE');
+        $this->entityManager()->getConnection()->executeStatement('TRUNCATE customer, category, product, customer_order, order_line CASCADE');
     }
 
     /**
@@ -45,15 +46,18 @@ trait WebshopTestTrait
 
     /**
      * Creates a product with the given SKU, price, stock and sale status pinned down.
+     *
+     * Without a category the product lands in a realistic one for its random product type.
      */
-    private function createProduct(string $sku, int $amount, int $stock, string $currency = 'EUR', bool $active = true): Product
+    private function createProduct(string $sku, int $amount, int $stock, string $currency = 'EUR', bool $active = true, ?Category $category = null): Product
     {
-        return ProductFactory::createOne([
+        return ProductFactory::createOne(array_filter([
             'sku' => $sku,
             'price' => new Money($amount, $currency),
             'stock' => $stock,
             'active' => $active,
-        ]);
+            'category' => $category,
+        ], static fn (mixed $value): bool => null !== $value));
     }
 
     /**
@@ -84,5 +88,13 @@ trait WebshopTestTrait
     private function iri(Product $product): string
     {
         return '/api/products/'.$product->getId()->toRfc4122();
+    }
+
+    /**
+     * Returns the API IRI of a category, as clients send it for a product.
+     */
+    private function categoryIri(Category $category): string
+    {
+        return '/api/categories/'.$category->getId()->toRfc4122();
     }
 }

@@ -34,7 +34,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Area      | What it does                                                                        |
 |-----------|-------------------------------------------------------------------------------------|
 | Customers | Register, log in (JWT), view own profile                                            |
-| Catalog   | Browse products (public); create and update them (admin only)                       |
+| Catalog   | Browse products (public), filter by category; manage products and categories (admin only) |
 | Orders    | Place an order with one or more lines; view own orders; admins see all orders       |
 | Stock     | Reserved when an order is placed, safe under concurrent orders                      |
 
@@ -118,7 +118,8 @@ The interactive documentation (Swagger UI) is at **https://api-platform.ddev.sit
 |-------------|--------|--------------------------------------------------------------------------|
 | Accounts    | 2      | `admin@example.com` (admin) and `klant@example.com` (customer)           |
 | Customers   | 50     | Dutch names; the email matches the name (`floris.devries123@gmail.com`)  |
-| Products    | 200    | E.g. "Hoodie Utrecht, marineblauw"; prices ending in ,95; ~10% inactive  |
+| Categories  | 6      | Accessoires, Audio, Kantoor, Kleding, Mokken & flessen, Tassen           |
+| Products    | 200    | E.g. "Hoodie Utrecht, marineblauw" in "Kleding"; prices ending in ,95; ~10% inactive |
 | Orders      | ~460   | 1–5 lines each, spread over the last year, never before registration     |
 
 **Every account's password is `password`.** Log in as `klant@example.com` to see a customer with
@@ -170,7 +171,12 @@ plain JSON (`application/json`) works too. Relations are referenced by **IRI**, 
 | POST    | `/api/login`            | public                  | Log in; returns `{"token": "<JWT>"}`           |
 | GET     | `/api/me`               | authenticated           | Profile of the logged-in customer              |
 | GET     | `/api/customers/{id}`   | owner or admin          | Get a customer                                 |
-| GET     | `/api/products`         | public                  | Catalog (paginated, sorted by name)            |
+| GET     | `/api/categories`       | public                  | All categories, sorted by name (not paginated) |
+| GET     | `/api/categories/{id}`  | public                  | A single category                              |
+| POST    | `/api/categories`       | admin                   | Create a category (slug derived from the name unless given) |
+| PATCH   | `/api/categories/{id}`  | admin                   | Rename a category or change its slug           |
+| DELETE  | `/api/categories/{id}`  | admin                   | Delete an empty category (`409` while products still use it) |
+| GET     | `/api/products`         | public                  | Catalog (paginated, sorted by name); filter with `?category=<IRI>` or `?category.slug=kleding` |
 | GET     | `/api/products/{id}`    | public                  | A single product                               |
 | POST    | `/api/products`         | admin                   | Create a product                               |
 | PATCH   | `/api/products/{id}`    | admin                   | Update a product (`application/merge-patch+json`) |
@@ -195,8 +201,9 @@ curl -X POST $API/register -H 'Content-Type: application/json' -d '{
 TOKEN=$(curl -s -X POST $API/login -H 'Content-Type: application/json' \
   -d '{"email": "jan@example.com", "password": "S3cure-webshop-pass!"}' | jq -r .token)
 
-# Browse the catalog
+# Browse the catalog, or only one category
 curl $API/products
+curl "$API/products?category.slug=kleding"
 
 # Place an order
 curl -X POST $API/orders \
@@ -233,9 +240,15 @@ Response (`201 Created`, abbreviated):
 }
 ```
 
-### Creating a product (admin)
+### Creating a category and a product (admin)
 
 ```bash
+# The slug is derived from the name: "Mokken & flessen" becomes "mokken-flessen"
+curl -X POST $API/categories \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "name": "Mokken & flessen" }'
+
 curl -X POST $API/products \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -243,10 +256,14 @@ curl -X POST $API/products \
     "sku": "MUG-01",
     "name": "Mug",
     "description": "Sturdy stoneware mug, 350 ml",
+    "category": "/api/categories/0199dddd-…",
     "price": { "amount": 1250, "currency": "EUR" },
     "stock": 100
   }'
 ```
+
+A product is sent with its category as an IRI, and returned with the category embedded:
+`"category": { "@id": "/api/categories/0199dddd-…", "name": "Mokken & flessen", "slug": "mokken-flessen" }`.
 
 > **Amounts are always in cents** (the smallest currency unit): `1250` is € 12.50.
 > This way floating-point rounding errors can never occur.
@@ -328,6 +345,9 @@ Two customers ordering the last item at the same time must not both succeed. Tha
 | All products in one currency                                | `Order::place()`                     | 422    |
 | A price is never negative                                   | `Money`                              | 422    |
 | SKU is unique and contains only uppercase letters, digits and `-` | `Product` (Validator, `UniqueEntity`) | 422 |
+| Every product belongs to exactly one category                | `Product` (Validator, `NOT NULL` column) | 422 |
+| Category name and slug are unique; the slug is lowercase with dashes | `Category` (Validator, `UniqueEntity`) | 422 |
+| A category with products can't be deleted                    | `CategoryRemoveProcessor`            | 409       |
 
 ---
 
@@ -418,7 +438,8 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots        |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, login, access to profiles                    |
-| `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, admin management, validation, JSON schema  |
+| `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, category filters, admin management, validation, JSON schema |
+| `tests/Api/CategoryTest`       | Functional (HTTP)       | Public list, slugs, uniqueness, admin-only, delete protection |
 | `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization       |
 
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the

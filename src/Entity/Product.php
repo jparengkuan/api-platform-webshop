@@ -2,12 +2,15 @@
 
 namespace App\Entity;
 
+use ApiPlatform\Doctrine\Orm\Filter\ExactFilter;
+use ApiPlatform\Doctrine\Orm\Filter\IriFilter;
 use ApiPlatform\Metadata\ApiProperty;
 use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Patch;
 use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\QueryParameter;
 use App\Entity\Embeddable\Money;
 use App\Exception\InsufficientStockException;
 use App\Exception\InvalidMoneyException;
@@ -25,7 +28,14 @@ use Symfony\Component\Validator\Constraints as Assert;
 #[UniqueEntity(fields: ['sku'], message: 'A product with this SKU already exists.')]
 #[ApiResource(
     operations: [
-        new GetCollection(),
+        new GetCollection(
+            parameters: [
+                // ?category=/api/categories/{id}
+                'category' => new QueryParameter(filter: new IriFilter(), property: 'category', description: 'Only products in this category (IRI).'),
+                // ?category.slug=kleding
+                'category.slug' => new QueryParameter(filter: new ExactFilter(), property: 'category.slug', description: 'Only products in the category with this slug.'),
+            ],
+        ),
         new Get(),
         new Post(security: "is_granted('ROLE_ADMIN')"),
         new Patch(
@@ -63,6 +73,13 @@ class Product
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     #[Groups(['product:read', 'product:write'])]
     private ?string $description = null;
+
+    /** Sent as IRI when writing; read as an embedded object with name and slug. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(nullable: false)]
+    #[Assert\NotNull]
+    #[Groups(['product:read', 'product:write'])]
+    private ?Category $category = null;
 
     #[ORM\Embedded(class: Money::class, columnPrefix: 'price_')]
     #[Assert\NotNull]
@@ -174,6 +191,24 @@ class Product
     public function setDescription(?string $description): static
     {
         $this->description = $description;
+
+        return $this;
+    }
+
+    /**
+     * Returns the category the product belongs to.
+     */
+    public function getCategory(): ?Category
+    {
+        return $this->category;
+    }
+
+    /**
+     * Moves the product to another category.
+     */
+    public function setCategory(Category $category): static
+    {
+        $this->category = $category;
 
         return $this;
     }

@@ -4,6 +4,7 @@ namespace App\Story;
 
 use App\Entity\Customer;
 use App\Entity\Product;
+use App\Factory\CategoryFactory;
 use App\Factory\CustomerFactory;
 use App\Factory\OrderFactory;
 use App\Factory\ProductFactory;
@@ -13,7 +14,7 @@ use Zenstruck\Foundry\Story;
 use function Zenstruck\Foundry\faker;
 
 /**
- * A complete development webshop: fixed accounts to log in with, a catalog and a year of orders.
+ * A complete development webshop: fixed accounts to log in with, a categorized catalog and a year of orders.
  *
  * Load it with `bin/console foundry:load-fixtures`; set FOUNDRY_FAKER_SEED for a reproducible data set.
  */
@@ -42,6 +43,10 @@ final class AppStory extends Story
             CustomerFactory::createOne(['email' => self::CUSTOMER_EMAIL, 'firstName' => 'Jan', 'lastName' => 'Jansen']),
             ...CustomerFactory::createMany(self::CUSTOMERS),
         ];
+        // Created up front so they exist in a fixed order, even the ones no random product lands in.
+        foreach (CategoryFactory::NAMES as $name) {
+            CategoryFactory::createOne(['name' => $name]);
+        }
         $products = ProductFactory::createMany(self::PRODUCTS);
 
         for ($i = 0; $i < self::ORDERS; ++$i) {
