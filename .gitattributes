@@ -1,0 +1,9 @@
+# Always check out text files with LF line endings, also on Windows (overrides core.autocrlf).
+# Shell scripts, bin/console and everything copied into the Docker image break with CRLF.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
