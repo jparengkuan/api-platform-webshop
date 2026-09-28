@@ -2,6 +2,7 @@
 
 namespace App\Repository;
 
+use App\Entity\Customer;
 use App\Entity\Order;
 use App\Enum\OrderStatus;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
@@ -46,6 +47,14 @@ class OrderRepository extends ServiceEntityRepository implements OrderRepository
             ->setLockMode(LockMode::PESSIMISTIC_WRITE)
             ->setHint(Query::HINT_REFRESH, true)
             ->getOneOrNullResult();
+    }
+
+    /**
+     * Returns the customer's order that was placed with this Idempotency-Key, if any.
+     */
+    public function findByIdempotencyKey(Customer $customer, string $idempotencyKey): ?Order
+    {
+        return $this->findOneBy(['customer' => $customer, 'idempotencyKey' => $idempotencyKey]);
     }
 
     /**

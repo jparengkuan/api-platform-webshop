@@ -12,6 +12,7 @@ use App\Exception\BusinessRuleViolation;
 use App\Ordering\PlaceOrder;
 use App\Ordering\PlaceOrderHandler;
 use Symfony\Bundle\SecurityBundle\Security;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Security\Core\Exception\AccessDeniedException;
 use Symfony\Component\Uid\Uuid;
 
@@ -46,7 +47,22 @@ final readonly class PlaceOrderProcessor implements ProcessorInterface
             throw new AccessDeniedException('Only customers can place orders.');
         }
 
-        return ($this->placeOrder)(new PlaceOrder($customer, array_map($this->toLine(...), $data->lines)));
+        return ($this->placeOrder)(new PlaceOrder(
+            $customer,
+            array_map($this->toLine(...), $data->lines),
+            $this->idempotencyKey($context['request'] ?? null),
+        ));
+    }
+
+    /**
+     * Returns the request's Idempotency-Key header, or null when it wasn't sent. API Platform has
+     * already validated it (the HeaderParameter on the operation).
+     */
+    private function idempotencyKey(?Request $request): ?string
+    {
+        $key = $request?->headers->get('Idempotency-Key');
+
+        return null === $key || '' === $key ? null : $key;
     }
 
     /**

@@ -56,8 +56,93 @@ final class PlaceOrderTest extends ApiTestCase
         self::assertSame(8, $this->reloadProduct($mug)->getStock());
         self::assertSame(4, $this->reloadProduct($shirt)->getStock());
 
-        $this->client->request('GET', $response->toArray()['@id'], ['auth_bearer' => $token]);
+        // The client learns the order's id three ways, and what to do next.
+        $order = $response->toArray();
+        self::assertSame('/api/orders/'.$order['id'], $order['@id']);
+        self::assertResponseHeaderSame('Location', $order['@id']);
+        self::assertSame($order['@id'].'/payment', $order['paymentUrl']);
+        self::assertNotNull($order['payableUntil']);
+
+        $this->client->request('GET', $order['@id'], ['auth_bearer' => $token]);
         self::assertResponseIsSuccessful();
+    }
+
+    /**
+     * Repeating a request with the same Idempotency-Key (a double click, a network retry) returns the
+     * order already placed: no second order, no second stock reservation, no second event.
+     */
+    public function testIdempotencyKeyReturnsTheSameOrder(): void
+    {
+        $this->createCustomer('jan@example.com');
+        $mug = $this->createProduct('MUG-01', 1250, 10);
+        $request = [
+            'auth_bearer' => $this->login('jan@example.com'),
+            'headers' => ['Idempotency-Key' => 'cart-4f9d1c2e'],
+            'json' => ['lines' => [['product' => $this->iri($mug), 'quantity' => 2]]],
+        ];
+
+        $first = $this->client->request('POST', '/api/orders', $request)->toArray();
+        $second = $this->client->request('POST', '/api/orders', $request)->toArray();
+
+        self::assertResponseStatusCodeSame(201);
+        self::assertSame($first['id'], $second['id']);
+        self::assertSame(1, $this->entityManager()->getRepository(Order::class)->count());
+        self::assertSame(8, $this->reloadProduct($mug)->getStock());
+        self::assertSame([], $this->sentEvents(), 'The repeated request publishes nothing.');
+    }
+
+    /**
+     * A key reused for a different cart is a client error, not a silent new order or a wrong one.
+     */
+    public function testIdempotencyKeyForOtherLinesIsRejected(): void
+    {
+        $this->createCustomer('jan@example.com');
+        $mug = $this->createProduct('MUG-01', 1250, 10);
+        $token = $this->login('jan@example.com');
+        $headers = ['Idempotency-Key' => 'cart-4f9d1c2e'];
+        $this->client->request('POST', '/api/orders', ['auth_bearer' => $token, 'headers' => $headers, 'json' => ['lines' => [['product' => $this->iri($mug), 'quantity' => 2]]]]);
+
+        $this->client->request('POST', '/api/orders', ['auth_bearer' => $token, 'headers' => $headers, 'json' => ['lines' => [['product' => $this->iri($mug), 'quantity' => 3]]]]);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertJsonContains(['detail' => 'This Idempotency-Key was already used for an order with different lines; use a new key for a new order.']);
+        self::assertSame(8, $this->reloadProduct($mug)->getStock());
+    }
+
+    /**
+     * Keys are per customer: two customers can't collide, even with the same key.
+     */
+    public function testIdempotencyKeyIsPerCustomer(): void
+    {
+        $this->createCustomer('jan@example.com');
+        $this->createCustomer('piet@example.com');
+        $mug = $this->createProduct('MUG-01', 1250, 10);
+        $order = ['headers' => ['Idempotency-Key' => 'same-key'], 'json' => ['lines' => [['product' => $this->iri($mug), 'quantity' => 1]]]];
+
+        $jans = $this->client->request('POST', '/api/orders', ['auth_bearer' => $this->login('jan@example.com')] + $order)->toArray();
+        $piets = $this->client->request('POST', '/api/orders', ['auth_bearer' => $this->login('piet@example.com')] + $order)->toArray();
+
+        self::assertNotSame($jans['id'], $piets['id']);
+        self::assertSame(8, $this->reloadProduct($mug)->getStock());
+    }
+
+    /**
+     * An Idempotency-Key must be at most 255 visible ASCII characters.
+     */
+    public function testInvalidIdempotencyKeyIsRejected(): void
+    {
+        $this->createCustomer('jan@example.com');
+        $mug = $this->createProduct('MUG-01', 1250, 10);
+
+        $this->client->request('POST', '/api/orders', [
+            'auth_bearer' => $this->login('jan@example.com'),
+            'headers' => ['Idempotency-Key' => str_repeat('x', 256)],
+            'json' => ['lines' => [['product' => $this->iri($mug), 'quantity' => 1]]],
+        ]);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertJsonContains(['violations' => [['propertyPath' => 'Idempotency-Key']]]);
+        self::assertSame(10, $this->reloadProduct($mug)->getStock());
     }
 
     /**

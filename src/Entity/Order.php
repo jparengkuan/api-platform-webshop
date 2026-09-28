@@ -6,6 +6,7 @@ use ApiPlatform\Metadata\ApiProperty;
 use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\HeaderParameter;
 use ApiPlatform\Metadata\Post;
 use App\Dto\CheckoutOutput;
 use App\Dto\PlaceOrderInput;
@@ -20,12 +21,14 @@ use App\State\PlaceOrderProcessor;
 use App\State\StartPaymentProcessor;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
+use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Security\Core\User\UserInterface;
 use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Uid\Uuid;
+use Symfony\Component\Validator\Constraints as Assert;
 
 /**
  * A customer's order. Aggregate root: lines are only created through {@see Order::place()},
@@ -38,6 +41,8 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Table(name: 'customer_order')]
 #[ORM\Index(fields: ['customer', 'placedAt'])]
 #[ORM\Index(fields: ['status', 'placedAt'])]
+// One order per idempotency key per customer: a repeated request can never create a second order.
+#[ORM\UniqueConstraint(fields: ['customer', 'idempotencyKey'])]
 #[ApiResource(
     operations: [
         new GetCollection(
@@ -52,7 +57,19 @@ use Symfony\Component\Uid\Uuid;
             security: "is_granted('ROLE_USER')",
             input: PlaceOrderInput::class,
             processor: PlaceOrderProcessor::class,
-            exceptionToStatus: [BusinessRuleViolation::class => 422],
+            // Two different carts sent with the same key at the same moment: the unique index lets one win.
+            exceptionToStatus: [BusinessRuleViolation::class => 422, UniqueConstraintViolationException::class => 409],
+            parameters: [
+                'Idempotency-Key' => new HeaderParameter(
+                    schema: ['type' => 'string', 'maxLength' => 255, 'example' => '4f9d1c2e-8a7b-4c3d-9e1f-0a2b3c4d5e6f'],
+                    description: 'Optional. A key the client picks per cart (e.g. a UUID). Repeating the request with the same key returns the order already placed instead of a new one.',
+                    required: false,
+                    constraints: [
+                        new Assert\Length(max: 255),
+                        new Assert\Regex(pattern: '/^[!-~]+$/', message: 'Use visible ASCII characters only, e.g. a UUID.'),
+                    ],
+                ),
+            ],
         ),
         new Post(
             uriTemplate: '/orders/{id}/payment',
@@ -121,6 +138,10 @@ class Order
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $paymentReference = null;
 
+    /** The client's Idempotency-Key of the request that placed the order, if it sent one. */
+    #[ORM\Column(length: 255, nullable: true)]
+    private ?string $idempotencyKey = null;
+
     /**
      * Creates an empty order; use {@see Order::place()} to create a valid one.
      */
@@ -136,11 +157,12 @@ class Order
     /**
      * Places an order and reserves stock for every line.
      *
-     * @param list<array{Product, positive-int}> $items product and quantity pairs
+     * @param list<array{Product, positive-int}> $items          product and quantity pairs
+     * @param string|null                        $idempotencyKey the client's key for this request, if it sent one
      *
      * @throws BusinessRuleViolation when a business rule prevents the order
      */
-    public static function place(Customer $customer, array $items, \DateTimeImmutable $placedAt): self
+    public static function place(Customer $customer, array $items, \DateTimeImmutable $placedAt, ?string $idempotencyKey = null): self
     {
         if ([] === $items) {
             throw new EmptyOrderException();
@@ -154,6 +176,7 @@ class Order
         }
 
         $order = new self($customer, $placedAt);
+        $order->idempotencyKey = $idempotencyKey;
         $order->total = Money::zero((string) $currency);
 
         foreach ($items as [$product, $quantity]) {
@@ -231,6 +254,32 @@ class Order
     public function getPaidAt(): ?\DateTimeImmutable
     {
         return $this->paidAt;
+    }
+
+    /**
+     * Returns the client's Idempotency-Key of the request that placed the order, if any.
+     */
+    public function getIdempotencyKey(): ?string
+    {
+        return $this->idempotencyKey;
+    }
+
+    /**
+     * Tells whether the order has exactly these quantities per product id, e.g. to check that a
+     * repeated request is really the same one.
+     *
+     * @param array<string, int> $quantities quantity per RFC 4122 product id
+     */
+    public function hasQuantities(array $quantities): bool
+    {
+        $own = [];
+        foreach ($this->lines as $line) {
+            $own[(string) $line->getProduct()?->getId()->toRfc4122()] = $line->getQuantity();
+        }
+        ksort($own);
+        ksort($quantities);
+
+        return $own === $quantities;
     }
 
     /**

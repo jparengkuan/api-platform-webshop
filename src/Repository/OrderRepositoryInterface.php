@@ -2,6 +2,7 @@
 
 namespace App\Repository;
 
+use App\Entity\Customer;
 use App\Entity\Order;
 use Symfony\Component\Uid\Uuid;
 
@@ -15,6 +16,11 @@ interface OrderRepositoryInterface
      * Must be called inside a transaction.
      */
     public function findForUpdate(Uuid $id): ?Order;
+
+    /**
+     * Returns the customer's order that was placed with this Idempotency-Key, if any.
+     */
+    public function findByIdempotencyKey(Customer $customer, string $idempotencyKey): ?Order;
 
     /**
      * Returns the ids of orders that were placed before the given moment and are still unpaid.

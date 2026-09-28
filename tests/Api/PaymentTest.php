@@ -67,6 +67,29 @@ final class PaymentTest extends ApiTestCase
     }
 
     /**
+     * The order tells the client whether it can be paid: a paymentUrl only while that's possible.
+     */
+    public function testOrderShowsWhetherItCanBePaid(): void
+    {
+        $customer = $this->createCustomer('jan@example.com');
+        $unpaid = $this->unpaidOrder($customer);
+        $late = $this->unpaidOrder($customer, new \DateTimeImmutable('-'.(Order::PAYMENT_WINDOW_MINUTES + 1).' minutes'), 'MUG-02');
+        $paid = OrderFactory::createOne(['customer' => $customer]);
+        $token = $this->login('jan@example.com');
+
+        $this->client->request('GET', '/api/orders/'.$unpaid->getId()->toRfc4122(), ['auth_bearer' => $token]);
+        self::assertJsonContains([
+            'paymentUrl' => $this->paymentUrl($unpaid),
+            'payableUntil' => $unpaid->payableUntil()->format(\DateTimeInterface::RFC3339),
+        ]);
+
+        foreach ([$late, $paid] as $order) {
+            $this->client->request('GET', '/api/orders/'.$order->getId()->toRfc4122(), ['auth_bearer' => $token]);
+            self::assertJsonContains(['paymentUrl' => null, 'payableUntil' => null]);
+        }
+    }
+
+    /**
      * A paid order can't be paid again.
      */
     public function testPaidOrderCannotBePaidAgain(): void
@@ -174,11 +197,11 @@ final class PaymentTest extends ApiTestCase
     /**
      * Creates an order of two mugs that awaits payment.
      */
-    private function unpaidOrder(Customer $customer, \DateTimeImmutable $placedAt = new \DateTimeImmutable()): Order
+    private function unpaidOrder(Customer $customer, \DateTimeImmutable $placedAt = new \DateTimeImmutable(), string $sku = 'MUG-01'): Order
     {
         return OrderFactory::createOne([
             'customer' => $customer,
-            'items' => [[$this->createProduct('MUG-01', 1250, 10), 2]],
+            'items' => [[$this->createProduct($sku, 1250, 10), 2]],
             'placedAt' => $placedAt,
             'paid' => false,
         ]);

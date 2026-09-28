@@ -274,7 +274,7 @@ plain JSON (`application/json`) works too. Relations are referenced by **IRI**, 
 | GET     | `/api/products/{id}`    | public                  | A single product                               |
 | POST    | `/api/products`         | admin                   | Create a product                               |
 | PATCH   | `/api/products/{id}`    | admin                   | Update a product (`application/merge-patch+json`) |
-| POST    | `/api/orders`           | authenticated           | Place an order                                 |
+| POST    | `/api/orders`           | authenticated           | Place an order; send an `Idempotency-Key` header to make retries safe (see below) |
 | GET     | `/api/orders`           | authenticated           | Own orders (admin: all), newest first          |
 | GET     | `/api/orders/{id}`      | owner or admin          | A single order                                 |
 | POST    | `/api/orders/{id}/payment` | owner                | Start paying: returns a Stripe Checkout URL (see [Payments](#payments-stripe)) |
@@ -300,10 +300,11 @@ TOKEN=<access_token>
 curl $API/products
 curl "$API/products?category.slug=kleding"
 
-# Place an order
+# Place an order. The Idempotency-Key (one per cart, e.g. a UUID) makes a retry return the same order.
 curl -X POST $API/orders \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 4f9d1c2e-8a7b-4c3d-9e1f-0a2b3c4d5e6f' \
   -d '{
     "lines": [
       { "product": "/api/products/0199aaaa-0000-7000-8000-000000000001", "quantity": 2 },
@@ -312,12 +313,13 @@ curl -X POST $API/orders \
   }'
 ```
 
-Response (`201 Created`, abbreviated):
+Response (`201 Created`, header `Location: /api/orders/0199bbbb-…`, body abbreviated):
 
 ```json
 {
   "@id": "/api/orders/0199bbbb-…",
   "@type": "Order",
+  "id": "0199bbbb-…",
   "customer": "/api/customers/0199cccc-…",
   "status": "placed",
   "lines": [
@@ -332,11 +334,17 @@ Response (`201 Created`, abbreviated):
   ],
   "total": { "amount": 4999, "currency": "EUR" },
   "placedAt": "2026-09-27T12:00:00+00:00",
-  "paidAt": null
+  "paidAt": null,
+  "payableUntil": "2026-09-27T12:30:00+00:00",
+  "paymentUrl": "/api/orders/0199bbbb-…/payment"
 }
 ```
 
-Then pay it within 30 minutes:
+The order's id is in the body (`id`, and `@id` in JSON-LD) and in the `Location` header. **Every
+order says what can happen next:** `paymentUrl` and `payableUntil` are set only while the order can
+be paid right now (placed, and within its 30 minutes); otherwise both are `null`. A client shows a
+"Pay" button exactly when `paymentUrl` is there, on the confirmation page and in "my orders",
+without repeating the payment rules. Pay by posting to that URL:
 
 ```bash
 curl -X POST $API/orders/0199bbbb-…/payment -H "Authorization: Bearer $TOKEN" \
@@ -344,8 +352,27 @@ curl -X POST $API/orders/0199bbbb-…/payment -H "Authorization: Bearer $TOKEN" 
 # 201: { "checkoutUrl": "https://checkout.stripe.com/c/pay/cs_test_…", "checkoutId": "cs_test_…", "expiresAt": "…" }
 ```
 
-Send the customer to `checkoutUrl`. After paying, `GET /api/orders/{id}` shows `"status": "paid"`
-and a `paidAt`.
+Send the customer to `checkoutUrl`. After paying, `GET /api/orders/{id}` shows `"status": "paid"`,
+a `paidAt`, and no `paymentUrl` anymore.
+
+#### Safe retries: `Idempotency-Key`
+
+A double click or a network retry must not place two orders (each would reserve stock for 75
+minutes). The client generates a key once per cart, for example a UUID, and sends it with
+`POST /api/orders`:
+
+| Request                                         | Result                                                        |
+|-------------------------------------------------|---------------------------------------------------------------|
+| First request with a key                         | `201`, a new order                                            |
+| Same key, same lines (retry, double click)       | `201`, **the same order**: no second order, no second stock reservation, no second `OrderPlaced` |
+| Same key, different lines                        | `422`: the key belongs to another cart; use a new key          |
+| Same key from another customer                   | a separate order: keys are per customer                        |
+| Key longer than 255 characters or not visible ASCII | `422` with a violation on `Idempotency-Key`                 |
+| No key                                           | `201`, a new order every time (as before)                      |
+
+Two identical requests at the same moment are safe too: they lock the same products, so the second
+waits for the first and then finds its order. A unique index on (customer, key) is the last guard:
+if two *different* carts race with one key, one wins and the other gets `409`.
 
 ### Creating a category and a product (admin)
 
@@ -550,6 +577,8 @@ or Stripe.
 | Value Object            | `Money` (Doctrine embeddable, `readonly`)         | Immutable, self-validating, no float rounding              |
 | Snapshot                | `OrderLine` copies SKU, name and price            | Later catalog changes never alter past orders              |
 | Query Extension         | `CurrentCustomerOrdersExtension`                  | Automatically filters `GET /api/orders` to the logged-in customer |
+| Decorator (serializer)  | `OrderPaymentNormalizer`                          | Adds `paymentUrl`/`payableUntil` to every order, using the clock; the entity stays free of it |
+| Idempotent Receiver     | `Idempotency-Key` in `PlaceOrderHandler`          | A repeated request returns the first result instead of acting twice |
 | Strategy                | `InvoiceRenderer` in the Python service           | The document format can change without touching the consumer |
 
 ### Concurrency
@@ -731,6 +760,7 @@ the serializer and the handler, and checks the email, its recipient and the atta
 | Category name and slug are unique; the slug is lowercase with dashes | `Category` (Validator, `UniqueEntity`) | 422 |
 | A category with products can't be deleted                    | `CategoryRemoveProcessor`            | 409       |
 | Only a placed order can be paid, within 30 minutes of placing | `Order::assertPayable()`             | 422       |
+| One order per `Idempotency-Key` per customer; a repeat returns it, other lines are rejected | `PlaceOrderHandler`, unique index | 201 / 422 / 409 |
 | An unpaid order expires after 75 minutes; its stock is released | `Order::expire()` (scheduled)      | —         |
 
 ---
@@ -831,7 +861,7 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots, paying, the payment window, expiry |
 | `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published only after the commit; a rejected order is never published |
 | `tests/Unit/Messenger/MessengerEventPublisherTest` | Unit | Routing key per event; a broker failure is logged, not thrown |
-| `tests/Api/PaymentTest`        | Functional (HTTP)       | Starting a Stripe payment (owner, window, paid), the signed webhook (paid, repeated, bad signature, unpaid, after expiry) |
+| `tests/Api/PaymentTest`        | Functional (HTTP)       | `paymentUrl`/`payableUntil` per state, starting a Stripe payment (owner, window, paid), the signed webhook (paid, repeated, bad signature, unpaid, after expiry) |
 | `tests/Integration/ExpireUnpaidOrdersTest` | Integration (kernel) | Overdue unpaid orders expire and release stock, once; recent and paid orders stay |
 | `tests/Integration/InvoiceEmailTest` | Integration (kernel) | Invoice from the Python service → email with PDF to the customer; unknown customer isn't retried; retry round trip |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
@@ -839,7 +869,7 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | `tests/Api/ProductTest`        | Functional (HTTP)       | Public catalog, category filters, admin management, validation, JSON schema |
 | `tests/Api/CategoryTest`       | Functional (HTTP)       | Public list, slugs, uniqueness, admin-only, delete protection |
 | `tests/Api/HttpCacheTest`      | Functional (HTTP)       | Cache headers, cache tags, invalidation on changes and orders |
-| `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization       |
+| `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization, the id in body and `Location`, `Idempotency-Key` (repeat, other lines, per customer, invalid) |
 
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
 tables before every test. They create their data with the same Foundry factories as the dev
@@ -1026,6 +1056,7 @@ Symfony's standard layout: one directory per kind of class.
 │   ├── Ordering/            Use cases: place an order, start a payment, confirm a payment, expire an order
 │   ├── Payment/             CheckoutGatewayInterface, Stripe Checkout and webhook adapters
 │   ├── Repository/          Repository interfaces and Doctrine implementations
+│   ├── Serializer/          OrderPaymentNormalizer: paymentUrl and payableUntil on every order
 │   ├── State/               API Platform state providers and processors
 │   ├── Story/               Foundry story with the full dev data set
 │   ├── Transaction/         TransactionManagerInterface and its Doctrine implementation
@@ -1072,8 +1103,6 @@ Symfony's standard layout: one directory per kind of class.
 
 ## Known limitations and roadmap
 
-- **Idempotency:** retrying `POST /api/orders` after a timeout can create a duplicate order.
-  An idempotency-key header would solve this.
 - **Order lifecycle:** placed → paid or expired. Shipping, cancelling a paid order and refunds
   are still to come; a payment that arrives after expiry must be refunded by hand (it's logged as
   critical).

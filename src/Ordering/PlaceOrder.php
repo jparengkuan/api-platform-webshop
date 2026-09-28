@@ -17,11 +17,14 @@ final readonly class PlaceOrder
     /**
      * Creates the command and merges lines that refer to the same product.
      *
-     * @param iterable<array{Uuid, positive-int}> $lines product id and quantity pairs
+     * @param iterable<array{Uuid, positive-int}> $lines          product id and quantity pairs
+     * @param string|null                         $idempotencyKey the client's key for this request: repeating
+     *                                                            the request with it returns the same order
      */
     public function __construct(
         public Customer $customer,
         iterable $lines,
+        public ?string $idempotencyKey = null,
     ) {
         $quantities = [];
         foreach ($lines as [$productId, $quantity]) {
