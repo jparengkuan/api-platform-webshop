@@ -488,45 +488,51 @@ becomes `STRIPE_WEBHOOK_SECRET`. Staging uses the test keys and its own test-mod
 ## Architecture
 
 The code uses Symfony's standard directory layout (`Entity/`, `Repository/`, `State/`, …; see
-[Project structure](#project-structure)). Within it, the use cases depend on **interfaces (ports)**
-only; the Symfony, Doctrine and RabbitMQ specifics live in the classes that implement them
-(**adapters**), bound with `#[AsAlias]`.
+[Project structure](#project-structure)) and the standard building blocks for the rest:
+
+- **Every use case is a command on the Messenger bus.** Processors and controllers dispatch a
+  command (`PlaceOrder`, `StartPayment`, `PaymentReceived`, `ExpireOrder`) through `CommandBus`;
+  its `#[AsMessageHandler]` runs synchronously. The bus middleware wraps each command in **one
+  database transaction** (`doctrine_transaction`), so handlers contain no transaction code.
+- **Events go through a transactional outbox.** A handler records its event in the `outbox`
+  (a Doctrine transport) inside that same transaction; the worker relays it to RabbitMQ. An event
+  is stored if and only if its change is, and is delivered even when RabbitMQ was down.
+- **Ports and adapters.** Use cases depend on interfaces; the Doctrine, Messenger, Mailer and
+  Stripe specifics live in the classes that implement them, bound with `#[AsAlias]`.
+- **Access rules live in a voter** (`OrderVoter`), not in expressions repeated per operation.
 
 ### Placing an order
 
 ```
-HTTP (API Platform)         Use case                         Domain                    Adapters (ports)
-───────────────────         ────────                         ──────                    ────────────────
-PlaceOrderInput (DTO)  ─┐
-                        ├─▶ PlaceOrderProcessor ─▶ PlaceOrderHandler ─▶ Order::place()          ProductRepository
-Validator (#[Assert])  ─┘      (adapter)            │                  Product::reserveStock()   OrderRepository
-                                                    │                  Money                     (Doctrine ORM)
-                                                    ├─▶ TransactionManagerInterface ─▶ DoctrineTransactionManager
-                                                    └─▶ EventPublisherInterface     ─▶ MessengerEventPublisher ─▶ RabbitMQ
+HTTP (API Platform)       Command bus (one transaction)                Domain                   Adapters
+───────────────────       ─────────────────────────────                ──────                   ────────
+PlaceOrderInput (DTO) ─┐
+                       ├▶ PlaceOrderProcessor ─▶ CommandBus ─▶ PlaceOrderHandler ─▶ Order::place()          ProductRepository
+Validator (#[Assert]) ─┘     (adapter)       PlaceOrder        │                    Product::reserveStock()  OrderRepository
+                                                               └▶ EventPublisherInterface ─▶ outbox table ──(worker)──▶ RabbitMQ
 ```
 
 1. **API Platform** deserializes the request into `PlaceOrderInput` and validates it with the
    Validator constraints on the DTO, and the optional `Idempotency-Key` header with the constraints
    of its `HeaderParameter`.
-2. **`PlaceOrderProcessor`** (adapter) turns the DTO into a `PlaceOrder` command, together with
-   the logged-in customer and the `Idempotency-Key`.
-3. **`PlaceOrderHandler`** (use case) runs a transaction through `TransactionManagerInterface` and
-   loads the products with a write lock. With an `Idempotency-Key` it then looks for an order
-   placed with that key; if there is one, it returns that order and stops here.
+2. **`PlaceOrderProcessor`** (adapter) dispatches a `PlaceOrder` command with the logged-in customer
+   and the `Idempotency-Key`. The bus opens a transaction.
+3. **`PlaceOrderHandler`** loads the products with a write lock. With an `Idempotency-Key` it then
+   looks for an order placed with that key; if there is one, it returns that order and stops here.
 4. **`Order::place()`** checks the business rules, reserves stock and calculates the total.
-5. After the commit the handler publishes an `OrderPlaced` event through `EventPublisherInterface`
-   (see [Events](#events-rabbitmq)), and API Platform returns the order as `201`, with
-   `OrderPaymentNormalizer` adding `paymentUrl` and `payableUntil`. On failure the transaction
-   rolls back, nothing is stored and nothing is published.
+5. The handler stores the order and records `OrderPlaced` in the outbox; the bus commits both
+   together. API Platform returns the order as `201`, with `OrderPaymentNormalizer` adding
+   `paymentUrl` and `payableUntil`. On failure the transaction rolls back: no order, no event.
 
 ### Paying an order
 
 ```
-POST /api/orders/{id}/payment ─▶ StartPaymentProcessor ─▶ StartPaymentHandler ─▶ Order::assertPayable()
-                                                           └▶ CheckoutGatewayInterface ─▶ StripeCheckoutGateway ─▶ Stripe
-POST /stripe/webhook ─▶ StripeWebhookController ─▶ StripeWebhookParser (signature) ─▶ ConfirmPaymentHandler ─▶ Order::markPaid()
-                                                                                        └▶ EventPublisherInterface (OrderPaid)
-Scheduler (every 5 min) ─▶ ExpireUnpaidOrdersHandler ─▶ ExpireOrderHandler ─▶ Order::expire() (stock back)
+POST /api/orders/{id}/payment ─▶ StartPaymentProcessor ─▶ CommandBus(StartPayment) ─▶ StartPaymentHandler ─▶ Order::assertPayable()
+                                                                                         └▶ CheckoutGatewayInterface ─▶ StripeCheckoutGateway ─▶ Stripe
+POST /stripe/webhook ─▶ StripeWebhookController ─▶ StripeWebhookParser (signature) ─▶ CommandBus(PaymentReceived)
+                        ─▶ ConfirmPaymentHandler ─▶ Order::markPaid() └▶ EventPublisherInterface (OrderPaid → outbox)
+Scheduler (every 5 min) ─▶ ExpireUnpaidOrdersHandler ─▶ one ExpireOrder per order, each in its own transaction
+                        ─▶ ExpireOrderHandler ─▶ Order::expire() (stock back)
 ```
 
 ### Mailing an invoice
@@ -543,8 +549,7 @@ RabbitMQ invoice_generated ─▶ InvoiceEventSerializer ─▶ SendInvoiceEmail
 | `ProductRepositoryInterface`    | `ProductRepository` (Doctrine) | `PlaceOrderHandler`, `ExpireOrderHandler`  |
 | `OrderRepositoryInterface`      | `OrderRepository` (Doctrine)   | `PlaceOrderHandler`, `ConfirmPaymentHandler`, `ExpireOrderHandler`, `ExpireUnpaidOrdersHandler` |
 | `CustomerRepositoryInterface`   | `CustomerRepository` (Doctrine)| `SendInvoiceEmailHandler`                  |
-| `TransactionManagerInterface`   | `DoctrineTransactionManager`   | `PlaceOrderHandler`, `ConfirmPaymentHandler`, `ExpireOrderHandler` |
-| `EventPublisherInterface`       | `MessengerEventPublisher` (Messenger → RabbitMQ) | `PlaceOrderHandler`, `ConfirmPaymentHandler` |
+| `EventPublisherInterface`       | `MessengerEventPublisher` (Messenger → outbox → RabbitMQ) | `PlaceOrderHandler`, `ConfirmPaymentHandler` |
 | `InvoiceMailerInterface`        | `TwigInvoiceMailer` (Mailer + Twig) | `SendInvoiceEmailHandler`             |
 | `CheckoutGatewayInterface`      | `StripeCheckoutGateway` (Stripe Checkout) | `StartPaymentHandler`           |
 
@@ -556,9 +561,9 @@ or Stripe.
 
 | Principle                 | Where                                                                                      |
 |---------------------------|--------------------------------------------------------------------------------------------|
-| **S**ingle Responsibility | Processor = HTTP translation, handler = use case, entities = business rules, repository = storage, publisher = delivery to RabbitMQ, mailer = building and sending the email |
+| **S**ingle Responsibility | Processor = HTTP translation, command bus = transactions, handler = use case, entities = business rules, repository = storage, outbox relay = delivery to RabbitMQ, voter = access rules, mailer = building and sending the email |
 | **O**pen/Closed           | A new business rule = a new subclass of `BusinessRuleViolation`, the 422 mapping doesn't change. A new event implements `IntegrationEvent` and names its own routing key; the publisher doesn't change |
-| **L**iskov Substitution   | Every implementation of a port honors the same contract, e.g. `EventPublisherInterface::publish()` never throws, in production and in the test double |
+| **L**iskov Substitution   | Every implementation of a port honors the same contract, e.g. `EventPublisherInterface::publish()` records the event as part of the running transaction, in production (outbox) and in the test double |
 | **I**nterface Segregation | Small ports with only what the use cases need: `findForUpdate()`, `add()`, `findByIdempotencyKey()`, `findUnpaidPlacedBefore()`, `findById()`, `publish()`, `send()`, `createCheckout()`. The Stripe webhook check is a separate class (`StripeWebhookParser`), not part of the checkout port |
 | **D**ependency Inversion  | The use cases depend on ports and `Psr\Clock\ClockInterface`, not on Doctrine, Messenger, Mailer or Stripe classes |
 
@@ -568,8 +573,10 @@ or Stripe.
 |-------------------------|---------------------------------------------------|------------------------------------------------------------|
 | Ports and Adapters      | See the table above                               | Use cases independent of frameworks; easy to test and replace |
 | Repository              | `ProductRepository`, `OrderRepository`, `CustomerRepository` | Storage logic separated from domain and use case |
-| Command + Handler       | `PlaceOrder` + `PlaceOrderHandler`; `StartPaymentHandler`, `ConfirmPaymentHandler`, `ExpireOrderHandler` | Use cases independent of HTTP; reusable from a controller, the scheduler or Messenger |
-| Unit of Work            | `TransactionManagerInterface`                     | One transaction per use case, rolled back as a whole       |
+| Command Bus             | `CommandBus`, commands `PlaceOrder`, `StartPayment`, `PaymentReceived`, `ExpireOrder` with their `#[AsMessageHandler]` | Every use case is triggered the same way, from HTTP, the webhook or the scheduler |
+| Unit of Work            | `doctrine_transaction` middleware                 | One transaction per command, committed or rolled back as a whole |
+| Transactional Outbox    | `outbox` transport, `MessengerEventPublisher`, `RelayIntegrationEventHandler` | Events are stored with their change and delivered at least once |
+| Voter                   | `OrderVoter` (`ORDER_VIEW`, `ORDER_PAY`)          | One place for who may see and pay an order                 |
 | Publish/Subscribe       | `IntegrationEvent`, `OrderPlaced`, `OrderPaid`, `InvoiceGenerated` over the `webshop.events` topic exchange | Services react to events without knowing each other |
 | Adapter                 | `PlaceOrderProcessor`, `StartPaymentProcessor`, `MessengerEventPublisher`, `TwigInvoiceMailer`, `StripeCheckoutGateway` | Connects a framework or provider to a use case |
 | Translator              | `InvoiceEventSerializer`                          | Maps the Python service's JSON (`type: invoice.generated`) to a PHP message |
@@ -595,9 +602,9 @@ Two customers ordering the last item at the same time must not both succeed. Tha
   deadlock each other.
 - `Query::HINT_REFRESH` makes sure stock is read from the database *after* the lock is acquired,
   even when the product was already in the identity map.
-- On an exception, `DoctrineTransactionManager` (`EntityManager::wrapInTransaction()`) rolls back
-  and closes the EntityManager. Stock already deducted in memory can therefore never be flushed
-  afterwards.
+- On an exception, the `doctrine_transaction` middleware rolls back and
+  `ClearEntityManagerOnFailureMiddleware` detaches the changed entities. Stock already deducted in
+  memory can therefore never be flushed by a later command.
 - The same product locks serialize two identical requests with one `Idempotency-Key`: the second
   one waits, then finds the first one's order. A unique index on (customer, key) catches the rest.
 - Paying and expiring lock the **order row** (`OrderRepository::findForUpdate()`), so a payment and
@@ -608,12 +615,15 @@ Two customers ordering the last item at the same time must not both succeed. Tha
 
 ## Events (RabbitMQ)
 
-Other systems learn about orders from events, not by polling the API. After the transaction
-commits, the use cases publish through `EventPublisherInterface`; `MessengerEventPublisher` sends the
-events with Symfony Messenger to the `webshop.events` topic exchange (transport `events` in
-`config/packages/messenger.yaml`):
+Other systems learn about orders from events, not by polling the API. The events travel through a
+**transactional outbox** (transports in `config/packages/messenger.yaml`):
 
-| Event        | Routing key    | Published by             | Queue in this project              |
+```
+handler ─▶ EventPublisherInterface ─▶ outbox (table messenger_messages, same transaction as the change)
+worker  ─▶ RelayIntegrationEventHandler ─▶ events (RabbitMQ, exchange webshop.events, routing key per event)
+```
+
+| Event        | Routing key    | Recorded by              | Queue in this project              |
 |--------------|----------------|--------------------------|------------------------------------|
 | `OrderPlaced`| `order.placed` | `PlaceOrderHandler`      | none: bind your own to receive it  |
 | `OrderPaid`  | `order.paid`   | `ConfirmPaymentHandler`  | `order_paid`, read by the [invoice service](#invoice-service-python) |
@@ -640,10 +650,13 @@ The API's events are JSON (`content_type: application/json`) with the header
 Amounts are in minor units (cents), like everywhere in the API. `productId` is `null` when the
 product no longer exists.
 
-- **Published after the commit:** a rolled-back order is never announced.
-- **At most once:** the events are published directly, without an outbox. If RabbitMQ is
-  unreachable, the order (or payment) still succeeds, the error is logged (`Could not publish …`)
-  and that event is lost. Consumers that must see every order can reconcile with `GET /api/orders`.
+- **Stored with the change:** the event is written to the outbox in the same transaction as the
+  order or payment. A rolled-back order is never announced; a committed one always is.
+- **At least once:** the worker relays the outbox to RabbitMQ. When RabbitMQ is down, the relay is
+  retried (for about an hour and a half), then kept in the failure transport
+  (`bin/console messenger:failed:show`, `messenger:failed:retry`). Orders and payments never wait
+  for RabbitMQ. A crash between relaying and marking the message done can deliver an event twice,
+  so consumers must tolerate duplicates (the invoice service does: same invoice number).
 - **Consumers:** each system binds **its own** queue to `webshop.events` with the key it needs, so
   each one receives every event. Don't read `order_paid`: the invoice service would miss those
   orders. The API doesn't consume its own events.
@@ -657,10 +670,13 @@ ddev exec -s rabbitmq rabbitmqadmin get messages --queue=invoice_generated
 
 The management UI runs at `https://api-platform.ddev.site:15673` (user `rabbitmq`, password `rabbitmq`).
 
-In tests the `events` transport is `in-memory://?serialize=true`: `PlaceOrderTest` checks the
-published event after its JSON round trip. `PlaceOrderHandlerTest` checks that it's published only
-after the commit, and `MessengerEventPublisherTest` checks the routing key and that a broker
-failure is logged instead of failing the order.
+Watch the outbox from the database: `SELECT queue_name, count(*) FROM messenger_messages GROUP BY 1`
+(rows with `queue_name = 'outbox'` are waiting for the worker; `failed` needs attention).
+
+In tests the `outbox` transport is `in-memory://?serialize=true`: `PlaceOrderTest` checks the
+recorded event after its JSON round trip, `OutboxRelayTest` that the relay publishes it to the
+`events` transport with its routing key, and `MessengerEventPublisherTest` that a failure to record
+it fails the command instead of losing the event.
 
 ### Invoice service (Python)
 
@@ -722,8 +738,9 @@ them), has no VAT breakdown and only uses Latin-1 characters (anything else beco
 ### Invoice email (Messenger worker)
 
 The API mails every invoice to the customer. A Messenger worker consumes the `invoice_generated`
-queue (transport `invoices` in `config/packages/messenger.yaml`); the same worker also runs the
-scheduled tasks (transport `scheduler_default`, see `src/Schedule.php`):
+queue (transport `invoices` in `config/packages/messenger.yaml`). The same worker also relays the
+outbox (transport `outbox`) and runs the scheduled tasks (transport `scheduler_default`, see
+`src/Schedule.php`):
 
 1. `InvoiceEventSerializer` turns the JSON of the Python service into an `InvoiceGenerated` message
    (Symfony's serializer maps the `type: invoice.generated` header to the class).
@@ -733,7 +750,7 @@ scheduled tasks (transport `scheduler_default`, see `src/Schedule.php`):
 
 | Situation                            | What happens                                                        |
 |--------------------------------------|---------------------------------------------------------------------|
-| The mail server is unreachable       | Retried after 1, 5 and 25 minutes, then dropped and logged          |
+| The mail server is unreachable       | Retried after 1, 5 and 25 minutes, then kept in the failure transport (`messenger:failed:retry`) |
 | Unknown customer, or no valid PDF    | Rejected at once without retry (`UnrecoverableMessageHandlingException`) |
 | The worker restarts                  | Unacknowledged messages are delivered again                         |
 
@@ -742,8 +759,8 @@ Running the worker:
 | Where      | How                                                                              |
 |------------|----------------------------------------------------------------------------------|
 | DDEV       | A daemon in the web container (`web_extra_daemons` in `.ddev/config.yaml`); emails go to Mailpit (`ddev mailpit`) |
-| Production | The `worker` service in `compose.prod.yaml`: the app image running `bin/console messenger:consume invoices scheduler_default` |
-| By hand    | `ddev exec bin/console messenger:consume invoices scheduler_default -vv`          |
+| Production | The `worker` service in `compose.prod.yaml`: the app image running `bin/console messenger:consume outbox invoices scheduler_default` |
+| By hand    | `ddev exec bin/console messenger:consume outbox invoices scheduler_default -vv`   |
 
 After changing PHP code, restart the worker (`ddev restart`, or `bin/console messenger:stop-workers`):
 it keeps the old code in memory.
@@ -821,8 +838,10 @@ Example of a broken business rule:
 - **Behind proxies:** in production Symfony trusts `X-Forwarded-*` from the private network (the TLS
   proxy and Varnish), so it sees HTTPS: redirects stay on `https://` and the session cookie is
   `Secure`, `HttpOnly`, `SameSite=Lax`.
-- **Authorization per operation:** through `security:` expressions in the `#[ApiResource]`
-  attributes, for example `is_granted('ROLE_ADMIN') or (is_granted('ROLE_USER') and object.isPlacedBy(user))`.
+- **Authorization per operation:** through `security:` in the `#[ApiResource]` attributes. Roles
+  for the catalog (`is_granted('ROLE_ADMIN')`); for orders the `OrderVoter`:
+  `is_granted('ORDER_VIEW', object)` (the customer, or an administrator) and
+  `is_granted('ORDER_PAY', object)` (only the customer, not even an administrator).
 - **Collections:** `CurrentCustomerOrdersExtension` limits the order list to the customer's own
   orders. This happens in the query itself, so no one else's data can leak through pagination or
   filters.
@@ -881,9 +900,11 @@ The CI mirrors the local commands: if `ddev composer qa` and the invoice service
 |--------------------------------|-------------------------|------------------------------------------------------------|
 | `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots, paying, the payment window, expiry |
-| `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published only after the commit; a rejected order is never published |
-| `tests/Unit/Messenger/MessengerEventPublisherTest` | Unit | Routing key per event; a broker failure is logged, not thrown |
+| `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | The order is stored and `OrderPlaced` recorded; a rejected order is neither |
+| `tests/Unit/Messenger/MessengerEventPublisherTest` | Unit | Events go onto the bus (the outbox); a failure to record one fails the command |
+| `tests/Unit/Security/OrderVoterTest` | Unit              | Who may view and pay an order (owner, other customer, admin, anonymous) |
 | `tests/Integration/ExpireUnpaidOrdersTest` | Integration (kernel) | Overdue unpaid orders expire and release stock, once; recent and paid orders stay |
+| `tests/Integration/OutboxRelayTest` | Integration (kernel) | An event read from the outbox is published to RabbitMQ with its routing key, not back to the outbox |
 | `tests/Integration/InvoiceEmailTest` | Integration (kernel) | Invoice from the Python service → email with PDF to the customer; unknown customer isn't retried; retry round trip |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
 | `tests/Api/OAuthTest`          | Functional (HTTP)       | Authorization Code flow, PKCE, redirect URIs, client secret, refresh tokens, disabled grants |
@@ -928,8 +949,8 @@ reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
 - **RabbitMQ** carries the events (see [Events](#events-rabbitmq)). It's only reachable inside
   the stack.
 - **invoice** (Python) turns `OrderPaid` into invoice PDFs; **worker** (the app image running
-  `messenger:consume invoices scheduler_default`) mails them to the customers and expires unpaid
-  orders.
+  `messenger:consume outbox invoices scheduler_default`) relays the outbox to RabbitMQ, mails the
+  invoices to the customers and expires unpaid orders.
 - **TLS** is terminated by the hosting platform's reverse proxy in front of Varnish (Coolify
   does this automatically, with Let's Encrypt). The stack itself only speaks HTTP and publishes no
   public ports.
@@ -1074,15 +1095,15 @@ Symfony's standard layout: one directory per kind of class.
 │   ├── Factory/             Foundry factories for test data (dev/test only)
 │   ├── Mailer/              InvoiceMailerInterface and its Twig/Mailer implementation
 │   ├── Message/             Integration events (OrderPlaced, OrderPaid, InvoiceGenerated) and scheduled tasks
-│   ├── MessageHandler/      SendInvoiceEmailHandler, ExpireUnpaidOrdersHandler (run in the Messenger worker)
-│   ├── Messenger/           EventPublisherInterface, MessengerEventPublisher, InvoiceEventSerializer
-│   ├── Ordering/            Use cases: place an order, start a payment, confirm a payment, expire an order
+│   ├── MessageHandler/      SendInvoiceEmailHandler, ExpireUnpaidOrdersHandler, RelayIntegrationEventHandler (worker)
+│   ├── Messenger/           CommandBus, the outbox publisher, the failure middleware, InvoiceEventSerializer
+│   ├── Ordering/            Commands and handlers: place an order, start a payment, confirm a payment, expire an order
 │   ├── Payment/             CheckoutGatewayInterface, Stripe Checkout and webhook adapters
 │   ├── Repository/          Repository interfaces and Doctrine implementations
+│   ├── Security/            OrderVoter: who may view and pay an order
 │   ├── Serializer/          OrderPaymentNormalizer: paymentUrl and payableUntil on every order
 │   ├── State/               API Platform state providers and processors
 │   ├── Story/               Foundry story with the full dev data set
-│   ├── Transaction/         TransactionManagerInterface and its Doctrine implementation
 │   └── Schedule.php         Recurring tasks (Symfony Scheduler): expire unpaid orders every 5 minutes
 ├── templates/
 │   ├── emails/              The invoice email (HTML and text)
@@ -1139,14 +1160,10 @@ Symfony's standard layout: one directory per kind of class.
   which this project doesn't allow (`allow-contrib: false`). Enabling it would make the test
   isolation transactional and faster.
 - **Catalog:** inactive products still show up in the public list, although they can't be ordered.
-- **Events at most once:** `OrderPlaced` and `OrderPaid` are published directly after the commit.
-  When RabbitMQ is down the event is lost (and logged); a transactional outbox would make it
-  reliable.
-- **Invoice emails:** a crash right after sending can send an email twice, and after the last retry
-  a failed email is dropped (logged) instead of kept in a failure transport.
-- **RabbitMQ timeouts:** the AMQP connect/read/write timeouts are unset (`0`), so a RabbitMQ host
-  that doesn't answer at all can hold up `POST /api/orders` and the webhook. A short
-  `connect_timeout`/`read_timeout` on the transport in `messenger.yaml` would bound that.
+- **Invoice emails:** a crash right after sending can send an email twice.
+- **RabbitMQ timeouts:** the AMQP connect/read/write timeouts are unset (`0`). Requests no longer
+  talk to RabbitMQ (the outbox does), but a RabbitMQ host that doesn't answer at all can still hold
+  up the worker; a short `connect_timeout`/`read_timeout` on the transports would bound that.
 - **Concurrency test:** the locking is designed for concurrent orders, but there is no test yet
   that actually fires parallel requests.
 

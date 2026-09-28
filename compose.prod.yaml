@@ -82,7 +82,7 @@ services:
     build: *app-build
     image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    command: ['bin/console', 'messenger:consume', 'invoices', 'scheduler_default', '--time-limit=3600', '--memory-limit=128M', '-vv']
+    command: ['bin/console', 'messenger:consume', 'outbox', 'invoices', 'scheduler_default', '--time-limit=3600', '--memory-limit=128M', '-vv']
     environment: *app-environment
     # The image's health check probes the web server, which doesn't run here.
     healthcheck:

@@ -2,20 +2,21 @@
 
 namespace App\Ordering;
 
-use App\Entity\Order;
 use App\Exception\OrderNotPayableException;
 use App\Message\OrderPaid;
 use App\Messenger\EventPublisherInterface;
 use App\Payment\PaymentReceived;
 use App\Repository\OrderRepositoryInterface;
-use App\Transaction\TransactionManagerInterface;
 use Psr\Clock\ClockInterface;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 /**
- * Use case: the payment provider reports a payment. Marks the order paid and, once that is committed,
- * publishes {@see OrderPaid}. Safe to call more than once for the same payment.
+ * Use case: the payment provider reports a payment. Marks the order paid and records {@see OrderPaid}
+ * in the same transaction (command bus, doctrine_transaction middleware). Safe to run more than
+ * once for the same payment.
  */
+#[AsMessageHandler]
 final readonly class ConfirmPaymentHandler
 {
     /**
@@ -23,7 +24,6 @@ final readonly class ConfirmPaymentHandler
      */
     public function __construct(
         private OrderRepositoryInterface $orders,
-        private TransactionManagerInterface $transactions,
         private EventPublisherInterface $events,
         private ClockInterface $clock,
         private LoggerInterface $logger,
@@ -36,20 +36,19 @@ final readonly class ConfirmPaymentHandler
      */
     public function __invoke(PaymentReceived $payment): void
     {
+        // Locked: the expiry task can't expire this order while the payment is recorded.
+        $order = $this->orders->findForUpdate($payment->orderId);
+        if (null === $order) {
+            $this->logger->error('Payment {reference} is for unknown order {orderId}.', [
+                'reference' => $payment->paymentReference,
+                'orderId' => $payment->orderId->toRfc4122(),
+            ]);
+
+            return;
+        }
+
         try {
-            $paidOrder = $this->transactions->transactional(function () use ($payment): ?Order {
-                $order = $this->orders->findForUpdate($payment->orderId);
-                if (null === $order) {
-                    $this->logger->error('Payment {reference} is for unknown order {orderId}.', [
-                        'reference' => $payment->paymentReference,
-                        'orderId' => $payment->orderId->toRfc4122(),
-                    ]);
-
-                    return null;
-                }
-
-                return $order->markPaid($payment->paymentReference, $this->clock->now()) ? $order : null;
-            });
+            $paidNow = $order->markPaid($payment->paymentReference, $this->clock->now());
         } catch (OrderNotPayableException $exception) {
             // Paid after it expired: the stock may be gone, so the payment has to be refunded.
             $this->logger->critical('Order {orderId} was paid after it could no longer be paid; refund payment {reference}.', [
@@ -61,8 +60,8 @@ final readonly class ConfirmPaymentHandler
             return;
         }
 
-        if (null !== $paidOrder) {
-            $this->events->publish(OrderPaid::fromOrder($paidOrder));
+        if ($paidNow) {
+            $this->events->publish(OrderPaid::fromOrder($order));
         }
     }
 }

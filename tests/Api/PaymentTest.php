@@ -9,7 +9,8 @@ use App\Entity\Order;
 use App\Enum\OrderStatus;
 use App\Factory\OrderFactory;
 use App\Message\OrderPaid;
-use App\Ordering\ExpireOrderHandler;
+use App\Messenger\CommandBus;
+use App\Ordering\ExpireOrder;
 use App\Tests\Support\FakeCheckoutGateway;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
@@ -185,7 +186,7 @@ final class PaymentTest extends ApiTestCase
     public function testPaymentForExpiredOrderIsNotApplied(): void
     {
         $order = $this->unpaidOrder($this->createCustomer('jan@example.com'));
-        self::assertTrue(self::getContainer()->get(ExpireOrderHandler::class)($order->getId()));
+        self::assertTrue(self::getContainer()->get(CommandBus::class)->dispatch(new ExpireOrder($order->getId())));
 
         $this->sendWebhook($this->checkoutEvent($order, 'paid'));
 
@@ -266,7 +267,7 @@ final class PaymentTest extends ApiTestCase
      */
     private function sentEvents(): array
     {
-        $transport = self::getContainer()->get('messenger.transport.events');
+        $transport = self::getContainer()->get('messenger.transport.outbox');
         self::assertInstanceOf(InMemoryTransport::class, $transport);
 
         return array_values([...$transport->getSent()]);

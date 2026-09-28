@@ -7,11 +7,13 @@ use ApiPlatform\State\ProcessorInterface;
 use App\Dto\CheckoutOutput;
 use App\Entity\Order;
 use App\Exception\OrderNotPayableException;
-use App\Ordering\StartPaymentHandler;
+use App\Messenger\CommandBus;
+use App\Ordering\StartPayment;
+use App\Payment\Checkout;
 use Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException;
 
 /**
- * Adapts POST /api/orders/{id}/payment to the {@see StartPaymentHandler} use case.
+ * Adapts POST /api/orders/{id}/payment to the {@see \App\Ordering\StartPaymentHandler} use case, through the command bus.
  *
  * @implements ProcessorInterface<Order, CheckoutOutput>
  */
@@ -20,7 +22,7 @@ final readonly class StartPaymentProcessor implements ProcessorInterface
     /**
      * Creates the processor.
      */
-    public function __construct(private StartPaymentHandler $startPayment)
+    public function __construct(private CommandBus $commandBus)
     {
     }
 
@@ -35,7 +37,8 @@ final readonly class StartPaymentProcessor implements ProcessorInterface
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): CheckoutOutput
     {
         try {
-            $checkout = ($this->startPayment)($data);
+            /** @var Checkout $checkout */
+            $checkout = $this->commandBus->dispatch(new StartPayment($data));
         } catch (\RuntimeException $exception) {
             throw new ServiceUnavailableHttpException(30, 'The payment provider is not available; try again shortly.', $exception);
         }

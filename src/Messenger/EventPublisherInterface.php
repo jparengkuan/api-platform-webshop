@@ -10,8 +10,8 @@ use App\Message\IntegrationEvent;
 interface EventPublisherInterface
 {
     /**
-     * Publishes the event. Never throws: a delivery failure must not undo what the caller did, so
-     * the implementation reports it instead (at-most-once delivery).
+     * Records the event as part of the running transaction. It's delivered to other systems once
+     * that transaction has committed, and never when it's rolled back (at-least-once delivery).
      */
     public function publish(IntegrationEvent $event): void;
 }

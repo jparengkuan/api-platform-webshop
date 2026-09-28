@@ -1,6 +1,37 @@
 framework:
     messenger:
+        # Messages that fail after their last retry are kept here (bin/console messenger:failed:show),
+        # never silently dropped.
+        failure_transport: failed
+
+        default_bus: messenger.bus.default
+        buses:
+            messenger.bus.default:
+                middleware:
+                    # Workers run for an hour: reconnect when the database closed an idle connection.
+                    - doctrine_ping_connection
+                    # After a failed command, detach what it changed (see the class).
+                    - App\Messenger\ClearEntityManagerOnFailureMiddleware
+                    # Every command runs in one database transaction, committed when its handler
+                    # succeeds; events recorded in the outbox are part of that same transaction.
+                    - doctrine_transaction
+
         transports:
+            # Transactional outbox: integration events are stored in the database, in the same
+            # transaction as the change they announce. The worker relays them to RabbitMQ.
+            outbox:
+                dsn: 'doctrine://default?queue_name=outbox&auto_setup=0'
+                serializer: messenger.transport.symfony_serializer
+                # The table comes from a migration, without PostgreSQL's LISTEN/NOTIFY trigger: poll.
+                options:
+                    use_notify: false
+                # RabbitMQ down? Keep retrying for about an hour and a half, then the failure transport.
+                retry_strategy:
+                    max_retries: 10
+                    delay: 5000
+                    multiplier: 2
+                    max_delay: 900000
+
             # Integration events for other systems: published to RabbitMQ as JSON, never consumed here.
             events:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
@@ -20,7 +51,7 @@ framework:
             invoices:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
                 serializer: App\Messenger\InvoiceEventSerializer
-                # A failed email is retried after 1, 5 and 25 minutes, then dropped (and logged).
+                # A failed email is retried after 1, 5 and 25 minutes, then kept in the failure transport.
                 retry_strategy:
                     max_retries: 3
                     delay: 60000
@@ -33,14 +64,22 @@ framework:
                         invoice_generated:
                             binding_keys: [!php/const App\Message\InvoiceGenerated::ROUTING_KEY]
 
+            failed:
+                dsn: 'doctrine://default?queue_name=failed&auto_setup=0'
+                options:
+                    use_notify: false
+
         routing:
-            App\Message\OrderPlaced: events
-            App\Message\OrderPaid: events
+            # Recorded in the outbox; RelayIntegrationEventHandler forwards them to the events transport.
+            App\Message\OrderPlaced: outbox
+            App\Message\OrderPaid: outbox
 
 when@test:
     framework:
         messenger:
             transports:
-                # serialize=true: every test also proves the event survives the JSON round trip.
-                events: 'in-memory://?serialize=true'
+                # serialize=true: every test also proves the events survive the JSON round trip.
+                outbox: 'in-memory://?serialize=true'
+                events: 'in-memory://'
                 invoices: 'in-memory://'
+                failed: 'in-memory://'

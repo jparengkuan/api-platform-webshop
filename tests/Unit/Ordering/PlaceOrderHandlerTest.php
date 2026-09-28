@@ -12,16 +12,12 @@ use App\Ordering\PlaceOrderHandler;
 use App\Repository\OrderRepositoryInterface;
 use App\Repository\ProductRepositoryInterface;
 use App\Tests\Support\RecordingEventPublisher;
-use App\Transaction\TransactionManagerInterface;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Clock\MockClock;
 
 final class PlaceOrderHandlerTest extends TestCase
 {
     private Product $mug;
-
-    /** Whether the transaction has committed; set by the in-memory transaction manager. */
-    private bool $committed = false;
 
     /**
      * Creates a product that can be ordered.
@@ -36,60 +32,47 @@ final class PlaceOrderHandlerTest extends TestCase
     }
 
     /**
-     * OrderPlaced is published once, only after the transaction committed, and describes the order.
+     * A placed order is stored and OrderPlaced is recorded once, describing it.
      */
-    public function testPublishesOrderPlacedAfterCommit(): void
+    public function testRecordsOrderPlaced(): void
     {
-        $committedWhenPublished = null;
-        $events = new RecordingEventPublisher(function () use (&$committedWhenPublished): void {
-            $committedWhenPublished = $this->committed;
-        });
+        $events = new RecordingEventPublisher();
+        $orders = $this->createMock(OrderRepositoryInterface::class);
+        $orders->expects(self::once())->method('add');
 
-        $order = $this->handler($events)(new PlaceOrder(new Customer(), [[$this->mug->getId(), 2]]));
+        $order = $this->handler($orders, $events)(new PlaceOrder(new Customer(), [[$this->mug->getId(), 2]]));
 
         self::assertEquals([OrderPlaced::fromOrder($order)], $events->published);
-        self::assertTrue($committedWhenPublished, 'The event must not be published before the order is committed.');
+        self::assertSame(8, $this->mug->getStock());
     }
 
     /**
-     * An order that breaks a business rule is rolled back and never announced.
+     * An order that breaks a business rule is neither stored nor announced (the command bus then
+     * rolls the transaction back).
      */
-    public function testRejectedOrderIsNotPublished(): void
+    public function testRejectedOrderIsNotRecorded(): void
     {
         $events = new RecordingEventPublisher();
+        $orders = $this->createMock(OrderRepositoryInterface::class);
+        $orders->expects(self::never())->method('add');
 
         try {
-            $this->handler($events)(new PlaceOrder(new Customer(), [[$this->mug->getId(), 11]]));
+            $this->handler($orders, $events)(new PlaceOrder(new Customer(), [[$this->mug->getId(), 11]]));
             self::fail('Ordering more than the stock must be rejected.');
         } catch (InsufficientStockException) {
         }
 
-        self::assertFalse($this->committed);
         self::assertSame([], $events->published);
     }
 
     /**
      * Builds the handler with in-memory adapters for its ports.
      */
-    private function handler(RecordingEventPublisher $events): PlaceOrderHandler
+    private function handler(OrderRepositoryInterface $orders, RecordingEventPublisher $events): PlaceOrderHandler
     {
         $products = $this->createStub(ProductRepositoryInterface::class);
         $products->method('findForUpdate')->willReturn([$this->mug->getId()->toRfc4122() => $this->mug]);
 
-        $transactions = $this->createStub(TransactionManagerInterface::class);
-        $transactions->method('transactional')->willReturnCallback(function (callable $operation): mixed {
-            $result = $operation();
-            $this->committed = true;
-
-            return $result;
-        });
-
-        return new PlaceOrderHandler(
-            $products,
-            $this->createStub(OrderRepositoryInterface::class),
-            $transactions,
-            $events,
-            new MockClock('2026-09-28 12:00'),
-        );
+        return new PlaceOrderHandler($products, $orders, $events, new MockClock('2026-09-28 12:00'));
     }
 }

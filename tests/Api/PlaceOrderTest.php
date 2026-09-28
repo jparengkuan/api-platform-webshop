@@ -342,7 +342,7 @@ final class PlaceOrderTest extends ApiTestCase
      */
     private function sentEvents(): array
     {
-        $transport = self::getContainer()->get('messenger.transport.events');
+        $transport = self::getContainer()->get('messenger.transport.outbox');
         self::assertInstanceOf(InMemoryTransport::class, $transport);
 
         return array_values([...$transport->getSent()]);

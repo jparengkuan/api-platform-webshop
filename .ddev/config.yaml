@@ -23,7 +23,7 @@ webimage_extra_packages: ["php${DDEV_PHP_VERSION}-amqp"]
 # tasks (expiring unpaid orders).
 web_extra_daemons:
     - name: "messenger-worker"
-      command: "php bin/console messenger:consume invoices scheduler_default --time-limit=3600 -vv"
+      command: "php bin/console messenger:consume outbox invoices scheduler_default --time-limit=3600 -vv"
       directory: /var/www/html
 default_container_timeout: "240"
 

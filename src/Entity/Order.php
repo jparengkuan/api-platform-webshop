@@ -50,7 +50,7 @@ use Symfony\Component\Validator\Constraints as Assert;
             security: "is_granted('ROLE_USER')",
         ),
         new Get(
-            security: "is_granted('ROLE_ADMIN') or (is_granted('ROLE_USER') and object.isPlacedBy(user))",
+            security: "is_granted('ORDER_VIEW', object)",
         ),
         new Post(
             description: 'Place an order for the logged-in customer.',
@@ -75,7 +75,7 @@ use Symfony\Component\Validator\Constraints as Assert;
             uriTemplate: '/orders/{id}/payment',
             status: 201,
             description: 'Start paying the order: returns a Stripe Checkout URL to send the customer to.',
-            security: "is_granted('ROLE_USER') and object.isPlacedBy(user)",
+            security: "is_granted('ORDER_PAY', object)",
             read: true,
             deserialize: false,
             input: false,

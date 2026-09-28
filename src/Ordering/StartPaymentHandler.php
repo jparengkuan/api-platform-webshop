@@ -7,10 +7,12 @@ use App\Exception\OrderNotPayableException;
 use App\Payment\Checkout;
 use App\Payment\CheckoutGatewayInterface;
 use Psr\Clock\ClockInterface;
+use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 /**
  * Use case: start paying an order. The amount comes from the order itself, never from the client.
  */
+#[AsMessageHandler]
 final readonly class StartPaymentHandler
 {
     /**
@@ -28,10 +30,10 @@ final readonly class StartPaymentHandler
      * @throws OrderNotPayableException when the order isn't awaiting payment or its payment window has closed
      * @throws \RuntimeException        when the payment provider can't be reached
      */
-    public function __invoke(Order $order): Checkout
+    public function __invoke(StartPayment $command): Checkout
     {
-        $order->assertPayable($this->clock->now());
+        $command->order->assertPayable($this->clock->now());
 
-        return $this->checkouts->createCheckout($order);
+        return $this->checkouts->createCheckout($command->order);
     }
 }

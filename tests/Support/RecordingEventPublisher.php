@@ -14,20 +14,10 @@ final class RecordingEventPublisher implements EventPublisherInterface
     public array $published = [];
 
     /**
-     * @param \Closure(IntegrationEvent): void|null $onPublish called for every event, e.g. to check state at that moment
-     */
-    public function __construct(private readonly ?\Closure $onPublish = null)
-    {
-    }
-
-    /**
-     * Records the event instead of sending it.
+     * Records the event instead of storing it in the outbox.
      */
     public function publish(IntegrationEvent $event): void
     {
         $this->published[] = $event;
-        if (null !== $this->onPublish) {
-            ($this->onPublish)($event);
-        }
     }
 }

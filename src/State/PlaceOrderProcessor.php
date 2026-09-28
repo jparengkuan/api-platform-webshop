@@ -9,8 +9,8 @@ use App\Dto\PlaceOrderInput;
 use App\Entity\Customer;
 use App\Entity\Order;
 use App\Exception\BusinessRuleViolation;
+use App\Messenger\CommandBus;
 use App\Ordering\PlaceOrder;
-use App\Ordering\PlaceOrderHandler;
 use Symfony\Bundle\SecurityBundle\Security;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Security\Core\Exception\AccessDeniedException;
@@ -27,7 +27,7 @@ final readonly class PlaceOrderProcessor implements ProcessorInterface
      * Creates the processor.
      */
     public function __construct(
-        private PlaceOrderHandler $placeOrder,
+        private CommandBus $commandBus,
         private Security $security,
     ) {
     }
@@ -47,7 +47,7 @@ final readonly class PlaceOrderProcessor implements ProcessorInterface
             throw new AccessDeniedException('Only customers can place orders.');
         }
 
-        return ($this->placeOrder)(new PlaceOrder(
+        return $this->commandBus->dispatch(new PlaceOrder(
             $customer,
             array_map($this->toLine(...), $data->lines),
             $this->idempotencyKey($context['request'] ?? null),

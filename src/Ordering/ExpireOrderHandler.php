@@ -4,12 +4,13 @@ namespace App\Ordering;
 
 use App\Repository\OrderRepositoryInterface;
 use App\Repository\ProductRepositoryInterface;
-use App\Transaction\TransactionManagerInterface;
-use Symfony\Component\Uid\Uuid;
+use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 /**
- * Use case: expire an unpaid order and put its reserved stock back.
+ * Use case: expire an unpaid order and put its reserved stock back. Runs on the command bus, in its
+ * own transaction.
  */
+#[AsMessageHandler]
 final readonly class ExpireOrderHandler
 {
     /**
@@ -18,7 +19,6 @@ final readonly class ExpireOrderHandler
     public function __construct(
         private OrderRepositoryInterface $orders,
         private ProductRepositoryInterface $products,
-        private TransactionManagerInterface $transactions,
     ) {
     }
 
@@ -27,25 +27,23 @@ final readonly class ExpireOrderHandler
      *
      * @return bool true when the order expired now
      */
-    public function __invoke(Uuid $orderId): bool
+    public function __invoke(ExpireOrder $command): bool
     {
-        return $this->transactions->transactional(function () use ($orderId): bool {
-            // The order first, then its products: a payment arriving at the same moment waits for us.
-            $order = $this->orders->findForUpdate($orderId);
-            if (null === $order) {
-                return false;
-            }
+        // The order first, then its products: a payment arriving at the same moment waits for us.
+        $order = $this->orders->findForUpdate($command->orderId);
+        if (null === $order) {
+            return false;
+        }
 
-            // Lock the products like placing an order does, so returned stock is never lost.
-            $productIds = [];
-            foreach ($order->getLines() as $line) {
-                if (null !== $product = $line->getProduct()) {
-                    $productIds[] = $product->getId();
-                }
+        // Lock the products like placing an order does, so returned stock is never lost.
+        $productIds = [];
+        foreach ($order->getLines() as $line) {
+            if (null !== $product = $line->getProduct()) {
+                $productIds[] = $product->getId();
             }
-            $this->products->findForUpdate($productIds);
+        }
+        $this->products->findForUpdate($productIds);
 
-            return $order->expire();
-        });
+        return $order->expire();
     }
 }
