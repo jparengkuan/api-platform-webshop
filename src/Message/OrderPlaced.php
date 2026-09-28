@@ -42,24 +42,13 @@ final readonly class OrderPlaced implements IntegrationEvent
      */
     public static function fromOrder(Order $order): self
     {
-        $lines = [];
-        foreach ($order->getLines() as $line) {
-            $lines[] = [
-                'productId' => $line->getProduct()?->getId()->toRfc4122(),
-                'sku' => $line->getSku(),
-                'name' => $line->getProductName(),
-                'quantity' => $line->getQuantity(),
-                'unitPrice' => $line->getUnitPrice()->amount,
-            ];
-        }
-
         return new self(
             $order->getId()->toRfc4122(),
             $order->getCustomer()->getId()->toRfc4122(),
             $order->getPlacedAt(),
             $order->getTotal()->amount,
             $order->getTotal()->currency,
-            $lines,
+            OrderLineSnapshot::listFrom($order),
         );
     }
 }

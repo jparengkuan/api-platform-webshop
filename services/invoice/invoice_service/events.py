@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 EXCHANGE = "webshop.events"
-ORDER_PLACED = "order.placed"
+ORDER_PAID = "order.paid"
 INVOICE_GENERATED = "invoice.generated"
 
 
 class InvalidEvent(ValueError):
-    """The message isn't a well-formed OrderPlaced event; retrying won't help."""
+    """The message isn't a well-formed OrderPaid event; retrying won't help."""
 
 
 @dataclass(frozen=True)
@@ -29,25 +29,27 @@ class OrderLine:
 
 
 @dataclass(frozen=True)
-class OrderPlaced:
-    """Mirrors App\\Message\\OrderPlaced in the API, as the Symfony serializer writes it."""
+class OrderPaid:
+    """Mirrors App\\Message\\OrderPaid in the API, as the Symfony serializer writes it."""
 
     order_id: str
     customer_id: str
     placed_at: datetime
+    paid_at: datetime
     total_amount: int
     """In minor units (cents)."""
     currency: str
     lines: tuple[OrderLine, ...]
 
     @classmethod
-    def from_json(cls, body: bytes) -> "OrderPlaced":
+    def from_json(cls, body: bytes) -> "OrderPaid":
         try:
             data = json.loads(body)
             return cls(
                 order_id=str(data["orderId"]),
                 customer_id=str(data["customerId"]),
                 placed_at=datetime.fromisoformat(data["placedAt"]),
+                paid_at=datetime.fromisoformat(data["paidAt"]),
                 total_amount=int(data["totalAmount"]),
                 currency=str(data["currency"]),
                 lines=tuple(
@@ -62,15 +64,15 @@ class OrderPlaced:
                 ),
             )
         except (ValueError, KeyError, TypeError) as error:
-            raise InvalidEvent(f"Not a valid OrderPlaced event: {error!r}") from error
+            raise InvalidEvent(f"Not a valid OrderPaid event: {error!r}") from error
 
 
-def invoice_number(order: OrderPlaced) -> str:
+def invoice_number(order: OrderPaid) -> str:
     """Derived from the order, so a redelivered event yields the same invoice, never a second one."""
     return f"INV-{order.order_id}"
 
 
-def invoice_generated(order: OrderPlaced, pdf: bytes, generated_at: datetime) -> dict[str, str]:
+def invoice_generated(order: OrderPaid, pdf: bytes, generated_at: datetime) -> dict[str, str]:
     """The invoice.generated payload: the PDF travels inside the JSON, Base64 encoded."""
     number = invoice_number(order)
     return {

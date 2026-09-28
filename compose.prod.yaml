@@ -26,6 +26,11 @@ x-app-environment: &app-environment
   # Sends the invoice emails, e.g. smtp://user:pass@smtp.example.com:587 (null://null sends nothing).
   MAILER_DSN: ${MAILER_DSN:?Set MAILER_DSN}
   MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
+  # Stripe: the secret key (sk_live_/sk_test_) and the signing secret of the webhook endpoint.
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?Set STRIPE_SECRET_KEY}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?Set STRIPE_WEBHOOK_SECRET}
+  # The frontend Stripe sends the customer back to after paying.
+  FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL}
 
 services:
   varnish:
@@ -69,14 +74,15 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  # Messenger worker: the same image, consuming invoice.generated and mailing each invoice PDF to
-  # the customer. It stops after an hour (or 128 MB) and Docker starts a fresh one.
+  # Messenger worker: the same image, mailing each invoice PDF to the customer (invoice.generated)
+  # and running the scheduled tasks, such as expiring unpaid orders. It stops after an hour (or
+  # 128 MB) and Docker starts a fresh one.
   worker:
     # Same build as php (fully cached), so the image exists even when this service starts first.
     build: *app-build
     image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    command: ['bin/console', 'messenger:consume', 'invoices', '--time-limit=3600', '--memory-limit=128M', '-vv']
+    command: ['bin/console', 'messenger:consume', 'invoices', 'scheduler_default', '--time-limit=3600', '--memory-limit=128M', '-vv']
     environment: *app-environment
     # The image's health check probes the web server, which doesn't run here.
     healthcheck:

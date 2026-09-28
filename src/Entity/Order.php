@@ -7,14 +7,17 @@ use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
+use App\Dto\CheckoutOutput;
 use App\Dto\PlaceOrderInput;
 use App\Entity\Embeddable\Money;
 use App\Enum\OrderStatus;
 use App\Exception\BusinessRuleViolation;
 use App\Exception\EmptyOrderException;
 use App\Exception\MixedCurrencyException;
+use App\Exception\OrderNotPayableException;
 use App\Repository\OrderRepository;
 use App\State\PlaceOrderProcessor;
+use App\State\StartPaymentProcessor;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
 use Doctrine\DBAL\Types\Types;
@@ -27,10 +30,14 @@ use Symfony\Component\Uid\Uuid;
 /**
  * A customer's order. Aggregate root: lines are only created through {@see Order::place()},
  * so an order is always complete, priced in one currency and backed by reserved stock.
+ *
+ * Lifecycle: placed (awaiting payment) → paid, or → expired when it isn't paid in time, which puts
+ * the reserved stock back.
  */
 #[ORM\Entity(repositoryClass: OrderRepository::class)]
 #[ORM\Table(name: 'customer_order')]
 #[ORM\Index(fields: ['customer', 'placedAt'])]
+#[ORM\Index(fields: ['status', 'placedAt'])]
 #[ApiResource(
     operations: [
         new GetCollection(
@@ -47,12 +54,35 @@ use Symfony\Component\Uid\Uuid;
             processor: PlaceOrderProcessor::class,
             exceptionToStatus: [BusinessRuleViolation::class => 422],
         ),
+        new Post(
+            uriTemplate: '/orders/{id}/payment',
+            status: 201,
+            description: 'Start paying the order: returns a Stripe Checkout URL to send the customer to.',
+            security: "is_granted('ROLE_USER') and object.isPlacedBy(user)",
+            read: true,
+            deserialize: false,
+            input: false,
+            output: CheckoutOutput::class,
+            processor: StartPaymentProcessor::class,
+            normalizationContext: ['groups' => ['checkout:read']],
+            exceptionToStatus: [BusinessRuleViolation::class => 422],
+            name: 'order_payment',
+        ),
     ],
     normalizationContext: ['groups' => ['order:read']],
     order: ['placedAt' => 'DESC'],
 )]
 class Order
 {
+    /** Minutes after placing within which a payment can be started. */
+    public const int PAYMENT_WINDOW_MINUTES = 30;
+
+    /**
+     * Minutes after placing after which an unpaid order expires: the payment window, plus the 30
+     * minutes a started Stripe Checkout stays valid, plus a margin for late webhooks.
+     */
+    public const int EXPIRES_AFTER_MINUTES = 75;
+
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME, unique: true)]
     #[ApiProperty(identifier: true)]
@@ -82,6 +112,14 @@ class Order
     #[ORM\Column(type: Types::DATETIME_IMMUTABLE)]
     #[Groups(['order:read'])]
     private \DateTimeImmutable $placedAt;
+
+    #[ORM\Column(type: Types::DATETIME_IMMUTABLE, nullable: true)]
+    #[Groups(['order:read'])]
+    private ?\DateTimeImmutable $paidAt = null;
+
+    /** The payment provider's id of the payment (a Stripe PaymentIntent), e.g. for refunds. */
+    #[ORM\Column(length: 255, nullable: true)]
+    private ?string $paymentReference = null;
 
     /**
      * Creates an empty order; use {@see Order::place()} to create a valid one.
@@ -185,5 +223,90 @@ class Order
     public function getPlacedAt(): \DateTimeImmutable
     {
         return $this->placedAt;
+    }
+
+    /**
+     * Returns when the order was paid, or null while it isn't.
+     */
+    public function getPaidAt(): ?\DateTimeImmutable
+    {
+        return $this->paidAt;
+    }
+
+    /**
+     * Returns the payment provider's id of the payment, or null while the order isn't paid.
+     */
+    public function getPaymentReference(): ?string
+    {
+        return $this->paymentReference;
+    }
+
+    /**
+     * Returns until when a payment may be started; a started payment must finish within its own
+     * time limit (Stripe: 30 minutes) after that.
+     */
+    public function payableUntil(): \DateTimeImmutable
+    {
+        return $this->placedAt->modify('+'.self::PAYMENT_WINDOW_MINUTES.' minutes');
+    }
+
+    /**
+     * Checks that a payment for this order may be started now.
+     *
+     * @throws OrderNotPayableException when the order isn't awaiting payment or the window has closed
+     */
+    public function assertPayable(\DateTimeImmutable $now): void
+    {
+        if (OrderStatus::Placed !== $this->status) {
+            throw OrderNotPayableException::notAwaitingPayment($this->status);
+        }
+
+        if ($now >= $this->payableUntil()) {
+            throw OrderNotPayableException::paymentWindowClosed();
+        }
+    }
+
+    /**
+     * Records the payment. Idempotent: a payment provider may report the same payment more than once.
+     *
+     * @return bool true when the order became paid now, false when it already was
+     *
+     * @throws OrderNotPayableException when the order has expired in the meantime (the payment must be refunded)
+     */
+    public function markPaid(string $paymentReference, \DateTimeImmutable $paidAt): bool
+    {
+        if (OrderStatus::Paid === $this->status) {
+            return false;
+        }
+
+        if (OrderStatus::Placed !== $this->status) {
+            throw OrderNotPayableException::notAwaitingPayment($this->status);
+        }
+
+        $this->status = OrderStatus::Paid;
+        $this->paidAt = $paidAt;
+        $this->paymentReference = $paymentReference;
+
+        return true;
+    }
+
+    /**
+     * Expires an unpaid order and puts its reserved stock back. The products must be locked by the caller.
+     *
+     * @return bool true when the order expired now, false when it was already paid or expired
+     */
+    public function expire(): bool
+    {
+        if (OrderStatus::Placed !== $this->status) {
+            return false;
+        }
+
+        $this->status = OrderStatus::Expired;
+        foreach ($this->lines as $line) {
+            // A product deleted since the order has no stock to return to.
+            $line->getProduct()?->releaseStock($line->getQuantity());
+        }
+
+        return true;
     }
 }

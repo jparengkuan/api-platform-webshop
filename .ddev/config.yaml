@@ -19,10 +19,11 @@ web_environment:
     - MAILER_DSN=smtp://localhost:1025
 corepack_enable: false
 webimage_extra_packages: ["php${DDEV_PHP_VERSION}-amqp"]
-# Messenger worker: mails the invoices from the invoice service (Mailpit shows them: ddev mailpit).
+# Messenger worker: mails the invoices (Mailpit shows them: ddev mailpit) and runs the scheduled
+# tasks (expiring unpaid orders).
 web_extra_daemons:
     - name: "messenger-worker"
-      command: "php bin/console messenger:consume invoices --time-limit=3600 -vv"
+      command: "php bin/console messenger:consume invoices scheduler_default --time-limit=3600 -vv"
       directory: /var/www/html
 default_container_timeout: "240"
 

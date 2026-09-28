@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from invoice_service.consumer import OrderPlacedHandler
+from invoice_service.consumer import OrderPaidHandler
 
 
 class FakeChannel:
@@ -27,20 +27,20 @@ class FakeChannel:
         self.calls.append(("reject", delivery_tag, requeue))
 
 
-def deliver(routing_key: str = "order.placed") -> SimpleNamespace:
+def deliver(routing_key: str = "order.paid") -> SimpleNamespace:
     return SimpleNamespace(routing_key=routing_key, delivery_tag=7)
 
 
-handler = OrderPlacedHandler(
+handler = OrderPaidHandler(
     render=lambda order: b"%PDF-1.3 " + order.order_id.encode(),
     now=lambda: datetime(2026, 9, 28, 12, 0, tzinfo=UTC),
 )
 
 
-def test_publishes_invoice_generated_then_acknowledges(order_placed_body: bytes) -> None:
+def test_publishes_invoice_generated_then_acknowledges(order_paid_body: bytes) -> None:
     channel = FakeChannel()
 
-    handler(channel, deliver(), None, order_placed_body)
+    handler(channel, deliver(), None, order_paid_body)
 
     (action, exchange, routing_key, payload, properties, mandatory), ack = channel.calls
     assert (action, exchange, routing_key, mandatory) == (
@@ -60,11 +60,11 @@ def test_publishes_invoice_generated_then_acknowledges(order_placed_body: bytes)
     assert ack == ("ack", 7), "The order event is acknowledged only after the invoice was published"
 
 
-def test_failed_publish_leaves_the_order_event_unacknowledged(order_placed_body: bytes) -> None:
+def test_failed_publish_leaves_the_order_event_unacknowledged(order_paid_body: bytes) -> None:
     channel = FakeChannel(fail_publish=True)
 
     with pytest.raises(ConnectionError):
-        handler(channel, deliver(), None, order_placed_body)
+        handler(channel, deliver(), None, order_paid_body)
 
     assert channel.calls == [], "Unacknowledged, so RabbitMQ delivers it again after reconnecting"
 
@@ -80,6 +80,6 @@ def test_malformed_event_is_rejected_without_requeue() -> None:
 def test_other_events_are_acknowledged_and_ignored() -> None:
     channel = FakeChannel()
 
-    handler(channel, deliver("order.cancelled"), None, b"{}")
+    handler(channel, deliver("order.placed"), None, b"{}")
 
     assert channel.calls == [("ack", 7)]

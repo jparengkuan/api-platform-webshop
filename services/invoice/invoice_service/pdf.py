@@ -3,7 +3,7 @@
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
-from .events import OrderPlaced, invoice_number
+from .events import OrderPaid, invoice_number
 
 COLUMNS = (
     ("SKU", 30, "L"),
@@ -24,10 +24,10 @@ def latin1(text: str) -> str:
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
-def render_invoice(order: OrderPlaced) -> bytes:
+def render_invoice(order: OrderPaid) -> bytes:
     pdf = FPDF(format="A4")
     pdf.set_title(invoice_number(order))
-    pdf.set_creation_date(order.placed_at)
+    pdf.set_creation_date(order.paid_at)
     pdf.add_page()
 
     pdf.set_font("Helvetica", "B", 20)
@@ -36,7 +36,9 @@ def render_invoice(order: OrderPlaced) -> bytes:
     pdf.set_font("Helvetica", size=10)
     for label, value in (
         ("Invoice number", invoice_number(order)),
-        ("Invoice date", order.placed_at.date().isoformat()),
+        ("Invoice date", order.paid_at.date().isoformat()),
+        ("Order date", order.placed_at.date().isoformat()),
+        ("Status", "Paid"),
         ("Order", order.order_id),
         ("Customer", order.customer_id),
     ):

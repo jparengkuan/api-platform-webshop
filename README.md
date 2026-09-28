@@ -4,8 +4,9 @@
 
 A REST/JSON-LD API for a simple webshop, built with **Symfony 8.1** and **API Platform 5**.
 Customers can register, log in through an OAuth2 client application, browse the catalog and place
-an order. Administrators maintain the product catalog. Every order is announced on RabbitMQ; a
-Python service turns it into an invoice PDF, which the API mails to the customer.
+an order, and pay it with Stripe. Administrators maintain the product catalog. Every paid order is
+announced on RabbitMQ; a Python service turns it into an invoice PDF, which the API mails to the
+customer.
 
 The code follows the [Symfony best practices](https://symfony.com/doc/current/best_practices.html),
 the SOLID principles and a set of targeted design patterns (see [Architecture](#architecture)).
@@ -19,6 +20,7 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 - [Installation](#installation)
 - [Authentication (OAuth2)](#authentication-oauth2)
 - [Using the API](#using-the-api)
+- [Payments (Stripe)](#payments-stripe)
 - [Architecture](#architecture)
 - [Events (RabbitMQ)](#events-rabbitmq)
   - [Invoice service (Python)](#invoice-service-python)
@@ -41,9 +43,10 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Customers | Register; log in with email and password through a registered OAuth2 client app; view own profile |
 | Catalog   | Browse products (public), filter by category; manage products and categories (admin only) |
 | Orders    | Place an order with one or more lines; view own orders; admins see all orders       |
-| Stock     | Reserved when an order is placed, safe under concurrent orders                      |
-| Events    | Every placed order is published to RabbitMQ as an `OrderPlaced` event (JSON), for other systems |
-| Invoices  | A Python service turns every `OrderPlaced` into an invoice PDF (`invoice.generated`); the API mails it to the customer |
+| Payments  | Pay an order with Stripe Checkout (cards, Apple/Google Pay, iDEAL); unpaid orders expire after 75 minutes |
+| Stock     | Reserved when an order is placed, safe under concurrent orders; released when an order expires |
+| Events    | `OrderPlaced` and `OrderPaid` are published to RabbitMQ (JSON), for other systems   |
+| Invoices  | A Python service turns every `OrderPaid` into an invoice PDF (`invoice.generated`); the API mails it to the customer |
 
 ## Tech stack
 
@@ -55,6 +58,8 @@ the SOLID principles and a set of targeted design patterns (see [Architecture](#
 | Database         | PostgreSQL 17 via Doctrine ORM 3 and Doctrine Migrations         |
 | Messaging        | Symfony Messenger with the AMQP transport, RabbitMQ 4            |
 | Email            | Symfony Mailer with Twig templates; Mailpit in DDEV              |
+| Payments         | Stripe Checkout (`stripe/stripe-php`), webhooks                  |
+| Scheduled tasks  | Symfony Scheduler, run by the Messenger worker                   |
 | Invoice service  | Python 3.13 with `pika` and `fpdf2`; Ruff and pytest             |
 | Authentication   | OAuth2 Authorization Code + PKCE (`league/oauth2-server-bundle`); JWT access tokens, refresh tokens |
 | Local environment| [DDEV](https://ddev.com) (nginx-fpm, PHP 8.4, PostgreSQL 17, RabbitMQ add-on, Mailpit) |
@@ -119,6 +124,9 @@ Emails (the invoices) land in Mailpit: `ddev mailpit` opens it.
 | `MESSENGER_TRANSPORT_DSN` | RabbitMQ that receives the events; DDEV points it at its RabbitMQ add-on. Tests use an in-memory transport |
 | `MAILER_DSN`         | Where emails go. `.env`: `null://null` (nothing is sent); DDEV: Mailpit; tests: always `null://null` |
 | `MAILER_FROM`        | Sender address of the emails to customers                        |
+| `STRIPE_SECRET_KEY`  | Stripe secret key; `sk_test_…` locally and on staging. Empty in `.env`: set it in `.env.dev.local` |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret of the webhook endpoint (`whsec_…`); tests use their own (`.env.test`) |
+| `FRONTEND_URL`       | Where Stripe sends the customer back to after paying (default `http://localhost:3000`) |
 | `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
 ### Test data
@@ -132,7 +140,7 @@ Emails (the invoices) land in Mailpit: `ddev mailpit` opens it.
 | Customers   | 50     | Dutch names; the email matches the name (`floris.devries123@example.net`) |
 | Categories  | 6      | Accessoires, Audio, Kantoor, Kleding, Mokken & flessen, Tassen           |
 | Products    | 200    | E.g. "Hoodie Utrecht, marineblauw" in "Kleding"; prices ending in ,95; ~10% inactive |
-| Orders      | ~460   | 1–5 lines each, spread over the last year, never before registration     |
+| Orders      | ~460   | 1–5 lines each, spread over the last year, never before registration; all paid |
 
 **Every account's password is `password`.** Log in as `klant@example.com` to see a customer with
 order history, or as `admin@example.com` to manage the catalog. All addresses use the reserved
@@ -269,6 +277,8 @@ plain JSON (`application/json`) works too. Relations are referenced by **IRI**, 
 | POST    | `/api/orders`           | authenticated           | Place an order                                 |
 | GET     | `/api/orders`           | authenticated           | Own orders (admin: all), newest first          |
 | GET     | `/api/orders/{id}`      | owner or admin          | A single order                                 |
+| POST    | `/api/orders/{id}/payment` | owner                | Start paying: returns a Stripe Checkout URL (see [Payments](#payments-stripe)) |
+| POST    | `/stripe/webhook`       | Stripe (signed)         | Stripe reports payments here; not part of the `/api` |
 
 ### Example: from registration to order
 
@@ -321,9 +331,21 @@ Response (`201 Created`, abbreviated):
     }
   ],
   "total": { "amount": 4999, "currency": "EUR" },
-  "placedAt": "2026-09-27T12:00:00+00:00"
+  "placedAt": "2026-09-27T12:00:00+00:00",
+  "paidAt": null
 }
 ```
+
+Then pay it within 30 minutes:
+
+```bash
+curl -X POST $API/orders/0199bbbb-…/payment -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{}'
+# 201: { "checkoutUrl": "https://checkout.stripe.com/c/pay/cs_test_…", "checkoutId": "cs_test_…", "expiresAt": "…" }
+```
+
+Send the customer to `checkoutUrl`. After paying, `GET /api/orders/{id}` shows `"status": "paid"`
+and a `paidAt`.
 
 ### Creating a category and a product (admin)
 
@@ -352,6 +374,86 @@ A product is sent with its category as an IRI, and returned with the category em
 
 > **Amounts are always in cents** (the smallest currency unit): `1250` is € 12.50.
 > This way floating-point rounding errors can never occur.
+
+---
+
+## Payments (Stripe)
+
+Orders are paid with [Stripe Checkout](https://docs.stripe.com/payments/checkout), Stripe's hosted
+payment page. The API owns the payment: it creates the checkout from the order's own total (never
+from what a client sends) and learns about the payment from Stripe's signed webhook. A frontend
+only calls one endpoint and redirects.
+
+```
+Frontend                      API                                    Stripe
+────────                      ───                                    ──────
+POST /api/orders ───────────▶ order "placed", stock reserved
+POST /api/orders/{id}/payment ▶ StartPaymentHandler ───────────────▶ Checkout session (lines, total)
+◀── { checkoutUrl } ─────────
+redirect to checkoutUrl ─────────────────────────────────────────▶ customer pays (card, iDEAL, …)
+                              POST /stripe/webhook ◀──────────────── checkout.session.completed (signed)
+                              ConfirmPaymentHandler: order "paid"
+                              ──▶ OrderPaid ──▶ invoice service ──▶ invoice email
+◀── redirect to FRONTEND_URL/checkout/success?order=…&session_id=…
+GET /api/orders/{id} ────────▶ "status": "paid"
+```
+
+### Order lifecycle
+
+| Status    | Meaning                                                      | Next                         |
+|-----------|--------------------------------------------------------------|------------------------------|
+| `placed`  | Stock reserved, awaiting payment                              | `paid`, or `expired`         |
+| `paid`    | Stripe confirmed the payment (`paidAt`, Stripe PaymentIntent id stored) | final           |
+| `expired` | Not paid in time; the stock is back on the shelf              | final                        |
+
+| Rule                                                                   | Where                              |
+|------------------------------------------------------------------------|------------------------------------|
+| A payment can be started up to **30 minutes** after placing (`Order::PAYMENT_WINDOW_MINUTES`) | `Order::assertPayable()` → 422 |
+| Only the customer who placed the order can pay it                       | `security` on the operation → 403  |
+| A Stripe checkout stays open for 30 minutes (Stripe's minimum)          | `StripeCheckoutGateway`            |
+| Unpaid orders expire **75 minutes** after placing: 30 + 30 + a margin for late webhooks (`Order::EXPIRES_AFTER_MINUTES`) | `ExpireUnpaidOrdersHandler`, every 5 minutes |
+| Only immediate payment methods (cards incl. Apple/Google Pay, iDEAL): stock can't wait days for a bank transfer | `StripeCheckoutGateway` |
+| Every webhook call must carry a valid `Stripe-Signature`; anything else is a `400` | `StripeWebhookParser` |
+| Stripe may send the same event twice: the order is paid, and `OrderPaid` published, only once | `Order::markPaid()` |
+| Payment and expiry lock the order row (`SELECT … FOR UPDATE`), so they can't both happen | `ConfirmPaymentHandler`, `ExpireOrderHandler` |
+| A payment that arrives after the order expired isn't applied; it's logged as **critical** with the PaymentIntent id, to refund | `ConfirmPaymentHandler` |
+
+### Trying it locally (test mode, free)
+
+Stripe's test mode costs nothing and moves no real money. You need a (free) Stripe account for
+the test keys.
+
+1. Put the test key in `.env.dev.local` (git-ignored): `STRIPE_SECRET_KEY=sk_test_…`
+2. Forward Stripe's webhooks to DDEV with the Stripe CLI (in Docker, on DDEV's network):
+   ```bash
+   docker run --rm -it --network ddev-api-platform_default -e STRIPE_API_KEY=sk_test_… \
+     stripe/stripe-cli listen --forward-to http://web/stripe/webhook \
+     --events checkout.session.completed,checkout.session.async_payment_succeeded
+   ```
+   It prints a `whsec_…` secret: put it in `.env.dev.local` as `STRIPE_WEBHOOK_SECRET`.
+3. Place an order, call `POST /api/orders/{id}/payment` and open the `checkoutUrl`.
+4. Pay with a [test card](https://docs.stripe.com/testing): `4242 4242 4242 4242` (any future
+   date, any CVC) succeeds, `4000 0000 0000 9995` is declined, `4000 0025 0000 3155` asks for
+   3D Secure. With iDEAL, Stripe's test page lets you approve or fail the payment.
+5. The order becomes `paid`; the invoice email shows up in Mailpit (`ddev mailpit`).
+
+If Stripe answers that `ideal` is an invalid payment method, enable iDEAL in the dashboard
+(Settings → Payment methods).
+
+### Tests
+
+The tests never call Stripe. `FakeCheckoutGateway` replaces the Checkout adapter in the test
+environment, and the webhook tests sign their own payloads with the test secret from `.env.test`,
+exactly like Stripe does (HMAC-SHA256 of `timestamp.payload`). `tests/Api/PaymentTest` covers
+starting a payment, ownership, the payment window, the webhook (paid, repeated, bad signature,
+unpaid, after expiry); `tests/Integration/ExpireUnpaidOrdersTest` covers expiry and stock release.
+
+### Going live
+
+Nothing changes in the code: in production set the live keys (`sk_live_…`), and in the Stripe
+dashboard add the webhook endpoint `https://<api domain>/stripe/webhook` for
+`checkout.session.completed` and `checkout.session.async_payment_succeeded`; its signing secret
+becomes `STRIPE_WEBHOOK_SECRET`. Staging uses the test keys and its own test-mode endpoint.
 
 ---
 
@@ -386,6 +488,16 @@ Validator (#[Assert])  ─┘      (adapter)            │                  Pro
    (see [Events](#events-rabbitmq)), and API Platform returns the order as `201`. On failure the
    transaction rolls back, nothing is stored and nothing is published.
 
+### Paying an order
+
+```
+POST /api/orders/{id}/payment ─▶ StartPaymentProcessor ─▶ StartPaymentHandler ─▶ Order::assertPayable()
+                                                           └▶ CheckoutGatewayInterface ─▶ StripeCheckoutGateway ─▶ Stripe
+POST /stripe/webhook ─▶ StripeWebhookController ─▶ StripeWebhookParser (signature) ─▶ ConfirmPaymentHandler ─▶ Order::markPaid()
+                                                                                        └▶ EventPublisherInterface (OrderPaid)
+Scheduler (every 5 min) ─▶ ExpireUnpaidOrdersHandler ─▶ ExpireOrderHandler ─▶ Order::expire() (stock back)
+```
+
 ### Mailing an invoice
 
 ```
@@ -403,9 +515,11 @@ RabbitMQ invoice_generated ─▶ InvoiceEventSerializer ─▶ SendInvoiceEmail
 | `TransactionManagerInterface`   | `DoctrineTransactionManager`   | `PlaceOrderHandler`                        |
 | `EventPublisherInterface`       | `MessengerEventPublisher` (Messenger → RabbitMQ) | `PlaceOrderHandler`      |
 | `InvoiceMailerInterface`        | `TwigInvoiceMailer` (Mailer + Twig) | `SendInvoiceEmailHandler`             |
+| `CheckoutGatewayInterface`      | `StripeCheckoutGateway` (Stripe Checkout) | `StartPaymentHandler`           |
 
-In unit tests the ports get in-memory stand-ins (`tests/Support/RecordingEventPublisher`, stubs),
-so the use cases are tested without a database, broker or mail server.
+In unit tests the ports get in-memory stand-ins (`tests/Support/RecordingEventPublisher`,
+`FakeCheckoutGateway`, stubs), so the use cases are tested without a database, broker, mail server
+or Stripe.
 
 ### SOLID in practice
 
@@ -425,12 +539,14 @@ so the use cases are tested without a database, broker or mail server.
 | Repository              | `ProductRepository`, `OrderRepository`, `CustomerRepository` | Storage logic separated from domain and use case |
 | Command + Handler       | `PlaceOrder`, `PlaceOrderHandler`                 | Use case independent of HTTP; reusable from CLI or Messenger |
 | Unit of Work            | `TransactionManagerInterface`                     | One transaction per use case, rolled back as a whole       |
-| Publish/Subscribe       | `IntegrationEvent`, `OrderPlaced`, `InvoiceGenerated` over the `webshop.events` topic exchange | Services react to events without knowing each other |
-| Adapter                 | `PlaceOrderProcessor`, `MessengerEventPublisher`, `TwigInvoiceMailer` | Connects a framework to a use case |
+| Publish/Subscribe       | `IntegrationEvent`, `OrderPlaced`, `OrderPaid`, `InvoiceGenerated` over the `webshop.events` topic exchange | Services react to events without knowing each other |
+| Adapter                 | `PlaceOrderProcessor`, `StartPaymentProcessor`, `MessengerEventPublisher`, `TwigInvoiceMailer`, `StripeCheckoutGateway` | Connects a framework or provider to a use case |
 | Translator              | `InvoiceEventSerializer`                          | Maps the Python service's JSON (`type: invoice.generated`) to a PHP message |
 | Data Transfer Object    | `PlaceOrderInput`, `OrderLineInput`               | API contract decoupled from the domain model               |
 | Aggregate Root          | `Order` (with `OrderLine`)                        | Lines can only be created through the order                |
-| Factory Method          | `Order::place()`, `OrderPlaced::fromOrder()`, `Money::zero()`, named constructors on exceptions | Always a valid object; intent in the name |
+| State                   | `OrderStatus` with `Order::markPaid()`, `Order::expire()`, `Order::assertPayable()` | Only valid transitions; paying and expiring are idempotent |
+| Scheduler               | `Schedule` with `ExpireUnpaidOrders`              | Recurring work in the same worker, without cron            |
+| Factory Method          | `Order::place()`, `OrderPlaced::fromOrder()`, `OrderPaid::fromOrder()`, `Money::zero()`, named constructors on exceptions | Always a valid object; intent in the name |
 | Value Object            | `Money` (Doctrine embeddable, `readonly`)         | Immutable, self-validating, no float rounding              |
 | Snapshot                | `OrderLine` copies SKU, name and price            | Later catalog changes never alter past orders              |
 | Query Extension         | `CurrentCustomerOrdersExtension`                  | Automatically filters `GET /api/orders` to the logged-in customer |
@@ -454,23 +570,27 @@ Two customers ordering the last item at the same time must not both succeed. Tha
 
 ## Events (RabbitMQ)
 
-Other systems (fulfilment, mail, analytics) learn about orders from events, not by polling the API.
-After an order is committed, `PlaceOrderHandler` publishes an **`OrderPlaced`** event through
-`EventPublisherInterface`; `MessengerEventPublisher` sends it with Symfony Messenger:
+Other systems learn about orders from events, not by polling the API. After the transaction
+commits, the use cases publish through `EventPublisherInterface`; `MessengerEventPublisher` sends the
+events with Symfony Messenger to the `webshop.events` topic exchange (transport `events` in
+`config/packages/messenger.yaml`):
 
-| Setting       | Value                                                                     |
-|---------------|---------------------------------------------------------------------------|
-| Exchange      | `webshop.events` (type `topic`)                                           |
-| Routing key   | `order.placed`                                                            |
-| Queue         | `order_placed`, bound to `order.placed`, durable; declared on the first publish |
-| Format        | JSON (`content_type: application/json`), header `type: App\Message\OrderPlaced` |
-| Configuration | `config/packages/messenger.yaml` (transport `events`)                     |
+| Event        | Routing key    | Published by             | Queue in this project              |
+|--------------|----------------|--------------------------|------------------------------------|
+| `OrderPlaced`| `order.placed` | `PlaceOrderHandler`      | none: bind your own to receive it  |
+| `OrderPaid`  | `order.paid`   | `ConfirmPaymentHandler`  | `order_paid`, read by the [invoice service](#invoice-service-python) |
+| `invoice.generated` | `invoice.generated` | the invoice service | `invoice_generated`, read by the [mailer worker](#invoice-email-messenger-worker) |
+
+The API's events are JSON (`content_type: application/json`) with the header
+`type: App\Message\OrderPlaced` or `App\Message\OrderPaid`. `OrderPaid` looks like this
+(`OrderPlaced` is the same without `paidAt`):
 
 ```json
 {
   "orderId": "01a0e480-2c56-7901-8a69-d653265d5d1f",
   "customerId": "01a0e480-2bc1-7f5f-8f48-3edd8527ee2c",
   "placedAt": "2026-09-22T20:54:48+00:00",
+  "paidAt": "2026-09-22T20:58:12+00:00",
   "totalAmount": 26775,
   "currency": "EUR",
   "lines": [
@@ -483,12 +603,12 @@ Amounts are in minor units (cents), like everywhere in the API. `productId` is `
 product no longer exists.
 
 - **Published after the commit:** a rolled-back order is never announced.
-- **At most once:** the event is published directly, without an outbox. If RabbitMQ is
-  unreachable, the order still succeeds, the error is logged (`Could not publish OrderPlaced…`) and
-  that event is lost. Consumers that must see every order can reconcile with `GET /api/orders`.
-- **Consumers:** the `order_placed` queue belongs to the [invoice service](#invoice-service-python).
-  Other systems bind **their own** queue to `webshop.events` with the key `order.placed`, so each
-  one receives every event. The API doesn't consume its own events.
+- **At most once:** the events are published directly, without an outbox. If RabbitMQ is
+  unreachable, the order (or payment) still succeeds, the error is logged (`Could not publish …`)
+  and that event is lost. Consumers that must see every order can reconcile with `GET /api/orders`.
+- **Consumers:** each system binds **its own** queue to `webshop.events` with the key it needs, so
+  each one receives every event. Don't read `order_paid`: the invoice service would miss those
+  orders. The API doesn't consume its own events.
 
 Locally, DDEV's RabbitMQ add-on receives the events. Inspect them with:
 
@@ -506,21 +626,22 @@ failure is logged instead of failing the order.
 
 ### Invoice service (Python)
 
-`services/invoice/` is a small Python 3.13 service (`pika`, `fpdf2`) that turns every order into
-an invoice PDF:
+`services/invoice/` is a small Python 3.13 service (`pika`, `fpdf2`) that turns every **paid**
+order into an invoice PDF:
 
 ```
-API ──order.placed──▶ webshop.events ──▶ order_placed ──▶ invoice service
+API ──order.paid──▶ webshop.events ──▶ order_paid ──▶ invoice service
                                                              │ renders the PDF
     invoice_generated ◀── webshop.events ◀──invoice.generated┘
 ```
 
-1. It consumes the `order_placed` queue, one message at a time.
-2. It renders the invoice (number, date, order, customer, lines, total) as an A4 PDF.
+1. It consumes the `order_paid` queue, one message at a time.
+2. It renders the invoice (number, invoice date = payment date, order date, customer, lines, total,
+   "Paid") as an A4 PDF.
 3. It publishes an **`invoice.generated`** event to the `webshop.events` exchange, with the PDF
    Base64-encoded in the JSON. The durable `invoice_generated` queue keeps these events until the
    API's [mailer worker](#invoice-email-messenger-worker) reads them.
-4. Only then does it acknowledge the `OrderPlaced` message.
+4. Only then does it acknowledge the `OrderPaid` message.
 
 ```json
 {
@@ -539,7 +660,7 @@ Symfony Messenger) and the invoice number as `message_id`.
 
 | Situation                            | What happens                                                        |
 |--------------------------------------|---------------------------------------------------------------------|
-| RabbitMQ restarts or the service crashes mid-way | The unacknowledged `OrderPlaced` is delivered again; the service reconnects every 5 seconds |
+| RabbitMQ restarts or the service crashes mid-way | The unacknowledged `OrderPaid` is delivered again; the service reconnects every 5 seconds |
 | The same order arrives twice         | Same invoice number (`INV-<orderId>`), so consumers can drop duplicates by `message_id` |
 | Malformed message                    | Logged and rejected without requeue (it would never succeed)        |
 | Other routing keys                   | Acknowledged and ignored                                            |
@@ -609,6 +730,8 @@ the serializer and the handler, and checks the email, its recipient and the atta
 | Every product belongs to exactly one category                | `Product` (Validator, `NOT NULL` column) | 422 |
 | Category name and slug are unique; the slug is lowercase with dashes | `Category` (Validator, `UniqueEntity`) | 422 |
 | A category with products can't be deleted                    | `CategoryRemoveProcessor`            | 409       |
+| Only a placed order can be paid, within 30 minutes of placing | `Order::assertPayable()`             | 422       |
+| An unpaid order expires after 75 minutes; its stock is released | `Order::expire()` (scheduled)      | —         |
 
 ---
 
@@ -705,9 +828,11 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | Suite                          | Type                    | What is tested                                             |
 |--------------------------------|-------------------------|------------------------------------------------------------|
 | `tests/Unit/Entity/MoneyTest`  | Unit                    | Arithmetic, equality and validation of `Money`             |
-| `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots        |
+| `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots, paying, the payment window, expiry |
 | `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published only after the commit; a rejected order is never published |
 | `tests/Unit/Messenger/MessengerEventPublisherTest` | Unit | Routing key per event; a broker failure is logged, not thrown |
+| `tests/Api/PaymentTest`        | Functional (HTTP)       | Starting a Stripe payment (owner, window, paid), the signed webhook (paid, repeated, bad signature, unpaid, after expiry) |
+| `tests/Integration/ExpireUnpaidOrdersTest` | Integration (kernel) | Overdue unpaid orders expire and release stock, once; recent and paid orders stay |
 | `tests/Integration/InvoiceEmailTest` | Integration (kernel) | Invoice from the Python service → email with PDF to the customer; unknown customer isn't retried; retry round trip |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
 | `tests/Api/OAuthTest`          | Functional (HTTP)       | Authorization Code flow, PKCE, redirect URIs, client secret, refresh tokens, disabled grants |
@@ -749,8 +874,9 @@ reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
 - **Varnish** caches public responses (see [HTTP caching](#http-caching-varnish)).
 - **RabbitMQ** carries the events (see [Events](#events-rabbitmq)). It's only reachable inside
   the stack.
-- **invoice** (Python) turns `OrderPlaced` into invoice PDFs; **worker** (the app image running
-  `messenger:consume invoices`) mails them to the customers.
+- **invoice** (Python) turns `OrderPaid` into invoice PDFs; **worker** (the app image running
+  `messenger:consume invoices scheduler_default`) mails them to the customers and expires unpaid
+  orders.
 - **TLS** is terminated by the hosting platform's reverse proxy in front of Varnish (Coolify
   does this automatically, with Let's Encrypt). The stack itself only speaks HTTP and publishes no
   public ports.
@@ -772,6 +898,9 @@ curl http://127.0.0.1:8080/api/products     # through Varnish, from the server i
 | `RABBITMQ_PASSWORD`        | RabbitMQ password (`RABBITMQ_USER` defaults to `app`), e.g. `openssl rand -hex 16`; the app's `MESSENGER_TRANSPORT_DSN` is built from it |
 | `MAILER_DSN`               | Mail server for the invoice emails, e.g. `smtp://user:pass@smtp.example.com:587`. `null://null` sends nothing; use a sandbox (e.g. Mailtrap) on staging |
 | `MAILER_FROM`              | Sender address of the invoice emails                                  |
+| `STRIPE_SECRET_KEY`        | Stripe secret key: `sk_test_…` on staging, `sk_live_…` in production   |
+| `STRIPE_WEBHOOK_SECRET`    | Signing secret of the webhook endpoint `https://<api domain>/stripe/webhook` in the Stripe dashboard |
+| `FRONTEND_URL`             | Where Stripe sends the customer back to after paying                  |
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
 | `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |
@@ -821,7 +950,8 @@ hosting platform (Coolify). It needs two repository secrets, `COOLIFY_STAGING_WE
 Staging runs the same stack, built with `INSTALL_DEV_DEPENDENCIES=1` and started with
 `RESET_DEMO_DATA=1`, so every deployment starts with the same fresh demo data (`admin@example.com`
 and `klant@example.com`, password `password`). Never reuse staging secrets or its database for
-production.
+production. Staging uses Stripe's **test** keys with its own test-mode webhook endpoint, so testers
+pay with the test cards.
 
 ### What happens on start
 
@@ -876,11 +1006,11 @@ Symfony's standard layout: one directory per kind of class.
 │   ├── php/                 Production php.ini
 │   └── varnish/             VCL and image of the HTTP cache
 ├── migrations/              Doctrine migrations (never change the schema by hand)
-├── services/invoice/        Python service: OrderPlaced in, invoice PDF out (invoice.generated)
+├── services/invoice/        Python service: OrderPaid in, invoice PDF out (invoice.generated)
 ├── src/
 │   ├── ApiResource/         Shared API settings (HTTP cache headers)
 │   ├── Command/             Console commands (app:oauth:generate-keys)
-│   ├── Controller/          SecurityController: the login page of the OAuth2 flow
+│   ├── Controller/          SecurityController (OAuth2 login page), StripeWebhookController
 │   ├── Doctrine/            API Platform query extension (CurrentCustomerOrdersExtension)
 │   ├── Dto/                 API input DTOs
 │   ├── Entity/              Doctrine entities and API resources
@@ -890,21 +1020,23 @@ Symfony's standard layout: one directory per kind of class.
 │   ├── Exception/           Domain exceptions (BusinessRuleViolation and its subclasses)
 │   ├── Factory/             Foundry factories for test data (dev/test only)
 │   ├── Mailer/              InvoiceMailerInterface and its Twig/Mailer implementation
-│   ├── Message/             Integration events (IntegrationEvent, OrderPlaced, InvoiceGenerated)
-│   ├── MessageHandler/      SendInvoiceEmailHandler (runs in the Messenger worker)
+│   ├── Message/             Integration events (OrderPlaced, OrderPaid, InvoiceGenerated) and scheduled tasks
+│   ├── MessageHandler/      SendInvoiceEmailHandler, ExpireUnpaidOrdersHandler (run in the Messenger worker)
 │   ├── Messenger/           EventPublisherInterface, MessengerEventPublisher, InvoiceEventSerializer
-│   ├── Ordering/            Use case: PlaceOrder command and handler
+│   ├── Ordering/            Use cases: place an order, start a payment, confirm a payment, expire an order
+│   ├── Payment/             CheckoutGatewayInterface, Stripe Checkout and webhook adapters
 │   ├── Repository/          Repository interfaces and Doctrine implementations
 │   ├── State/               API Platform state providers and processors
 │   ├── Story/               Foundry story with the full dev data set
-│   └── Transaction/         TransactionManagerInterface and its Doctrine implementation
+│   ├── Transaction/         TransactionManagerInterface and its Doctrine implementation
+│   └── Schedule.php         Recurring tasks (Symfony Scheduler): expire unpaid orders every 5 minutes
 ├── templates/
 │   ├── emails/              The invoice email (HTML and text)
 │   └── security/            The login page
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
 │   ├── Integration/         Kernel tests without HTTP (the invoice email)
-│   ├── Support/             Fixture helpers and test doubles (RecordingPurger, RecordingEventPublisher)
+│   ├── Support/             Fixture helpers and test doubles (RecordingPurger, RecordingEventPublisher, FakeCheckoutGateway)
 │   └── Unit/                Unit tests of entities, use cases and adapters
 ├── Dockerfile               Production image (FrankenPHP, worker mode)
 ├── compose.prod.yaml        Production stack: Varnish, app, worker, PostgreSQL, RabbitMQ, invoice service
@@ -942,8 +1074,9 @@ Symfony's standard layout: one directory per kind of class.
 
 - **Idempotency:** retrying `POST /api/orders` after a timeout can create a duplicate order.
   An idempotency-key header would solve this.
-- **Order lifecycle:** `OrderStatus` currently only knows `placed`. Paid, shipped and cancelled
-  (with stock returned) are still to come, for example with the Symfony Workflow component.
+- **Order lifecycle:** placed → paid or expired. Shipping, cancelling a paid order and refunds
+  are still to come; a payment that arrives after expiry must be refunded by hand (it's logged as
+  critical).
 - **Administration:** there is no endpoint or console command to create administrators (the
   fixtures provide `admin@example.com` for development).
 - **OAuth2 consent screen:** every registered client is trusted, so users aren't asked to approve
@@ -954,7 +1087,7 @@ Symfony's standard layout: one directory per kind of class.
   which this project doesn't allow (`allow-contrib: false`). Enabling it would make the test
   isolation transactional and faster.
 - **Catalog:** inactive products still show up in the public list, although they can't be ordered.
-- **Events at most once:** `OrderPlaced` is published directly after the commit. When RabbitMQ is
+- **Events at most once:** `OrderPlaced` and `OrderPaid` are published directly after the commit. When RabbitMQ is
   down the event is lost (and logged); a transactional outbox would make it reliable.
 - **Invoice emails:** a crash right after sending can send an email twice, and after the last retry
   a failed email is dropped (logged) instead of kept in a failure transport.

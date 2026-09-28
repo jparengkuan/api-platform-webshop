@@ -28,3 +28,6 @@ when@test:
     services:
         # Replaces the Varnish purger in tests (see config/packages/api_platform.yaml).
         App\Tests\Support\RecordingPurger: ~
+        # Stands in for Stripe: tests never call the real payment provider.
+        App\Tests\Support\FakeCheckoutGateway: ~
+        App\Payment\CheckoutGatewayInterface: '@App\Tests\Support\FakeCheckoutGateway'

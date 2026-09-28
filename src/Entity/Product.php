@@ -136,6 +136,18 @@ class Product
     }
 
     /**
+     * Puts reserved items back in stock, e.g. when an unpaid order expires.
+     */
+    public function releaseStock(int $quantity): void
+    {
+        if ($quantity < 1) {
+            throw new \InvalidArgumentException('Quantity must be at least 1.');
+        }
+
+        $this->stock += $quantity;
+    }
+
+    /**
      * Returns the unique identifier of this product.
      */
     public function getId(): Uuid
