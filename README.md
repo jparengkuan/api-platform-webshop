@@ -472,8 +472,9 @@ If Stripe answers that `ideal` is an invalid payment method, enable iDEAL in the
 The tests never call Stripe. `FakeCheckoutGateway` replaces the Checkout adapter in the test
 environment, and the webhook tests sign their own payloads with the test secret from `.env.test`,
 exactly like Stripe does (HMAC-SHA256 of `timestamp.payload`). `tests/Api/PaymentTest` covers
-starting a payment, ownership, the payment window, the webhook (paid, repeated, bad signature,
-unpaid, after expiry); `tests/Integration/ExpireUnpaidOrdersTest` covers expiry and stock release.
+`paymentUrl`/`payableUntil` per state, starting a payment (ownership, the payment window, a paid
+order) and the webhook (paid, repeated, bad signature, unpaid, after expiry);
+`tests/Integration/ExpireUnpaidOrdersTest` covers expiry and stock release.
 
 ### Going live
 
@@ -505,15 +506,18 @@ Validator (#[Assert])  ─┘      (adapter)            │                  Pro
 ```
 
 1. **API Platform** deserializes the request into `PlaceOrderInput` and validates it with the
-   Validator constraints on the DTO.
+   Validator constraints on the DTO, and the optional `Idempotency-Key` header with the constraints
+   of its `HeaderParameter`.
 2. **`PlaceOrderProcessor`** (adapter) turns the DTO into a `PlaceOrder` command, together with
-   the logged-in customer.
-3. **`PlaceOrderHandler`** (use case) runs a transaction through `TransactionManagerInterface`,
-   loads the products with a write lock and lets the domain do the work.
+   the logged-in customer and the `Idempotency-Key`.
+3. **`PlaceOrderHandler`** (use case) runs a transaction through `TransactionManagerInterface` and
+   loads the products with a write lock. With an `Idempotency-Key` it then looks for an order
+   placed with that key; if there is one, it returns that order and stops here.
 4. **`Order::place()`** checks the business rules, reserves stock and calculates the total.
 5. After the commit the handler publishes an `OrderPlaced` event through `EventPublisherInterface`
-   (see [Events](#events-rabbitmq)), and API Platform returns the order as `201`. On failure the
-   transaction rolls back, nothing is stored and nothing is published.
+   (see [Events](#events-rabbitmq)), and API Platform returns the order as `201`, with
+   `OrderPaymentNormalizer` adding `paymentUrl` and `payableUntil`. On failure the transaction
+   rolls back, nothing is stored and nothing is published.
 
 ### Paying an order
 
@@ -536,11 +540,11 @@ RabbitMQ invoice_generated ─▶ InvoiceEventSerializer ─▶ SendInvoiceEmail
 
 | Port (interface)                | Adapter                        | Used by                                    |
 |---------------------------------|--------------------------------|--------------------------------------------|
-| `ProductRepositoryInterface`    | `ProductRepository` (Doctrine) | `PlaceOrderHandler`                        |
-| `OrderRepositoryInterface`      | `OrderRepository` (Doctrine)   | `PlaceOrderHandler`                        |
+| `ProductRepositoryInterface`    | `ProductRepository` (Doctrine) | `PlaceOrderHandler`, `ExpireOrderHandler`  |
+| `OrderRepositoryInterface`      | `OrderRepository` (Doctrine)   | `PlaceOrderHandler`, `ConfirmPaymentHandler`, `ExpireOrderHandler`, `ExpireUnpaidOrdersHandler` |
 | `CustomerRepositoryInterface`   | `CustomerRepository` (Doctrine)| `SendInvoiceEmailHandler`                  |
-| `TransactionManagerInterface`   | `DoctrineTransactionManager`   | `PlaceOrderHandler`                        |
-| `EventPublisherInterface`       | `MessengerEventPublisher` (Messenger → RabbitMQ) | `PlaceOrderHandler`      |
+| `TransactionManagerInterface`   | `DoctrineTransactionManager`   | `PlaceOrderHandler`, `ConfirmPaymentHandler`, `ExpireOrderHandler` |
+| `EventPublisherInterface`       | `MessengerEventPublisher` (Messenger → RabbitMQ) | `PlaceOrderHandler`, `ConfirmPaymentHandler` |
 | `InvoiceMailerInterface`        | `TwigInvoiceMailer` (Mailer + Twig) | `SendInvoiceEmailHandler`             |
 | `CheckoutGatewayInterface`      | `StripeCheckoutGateway` (Stripe Checkout) | `StartPaymentHandler`           |
 
@@ -555,8 +559,8 @@ or Stripe.
 | **S**ingle Responsibility | Processor = HTTP translation, handler = use case, entities = business rules, repository = storage, publisher = delivery to RabbitMQ, mailer = building and sending the email |
 | **O**pen/Closed           | A new business rule = a new subclass of `BusinessRuleViolation`, the 422 mapping doesn't change. A new event implements `IntegrationEvent` and names its own routing key; the publisher doesn't change |
 | **L**iskov Substitution   | Every implementation of a port honors the same contract, e.g. `EventPublisherInterface::publish()` never throws, in production and in the test double |
-| **I**nterface Segregation | Small ports with only what a use case needs: `findForUpdate()`, `add()`, `findById()`, `publish()`, `send()` |
-| **D**ependency Inversion  | The use cases depend on ports and `Psr\Clock\ClockInterface`, not on Doctrine, Messenger or Mailer classes |
+| **I**nterface Segregation | Small ports with only what the use cases need: `findForUpdate()`, `add()`, `findByIdempotencyKey()`, `findUnpaidPlacedBefore()`, `findById()`, `publish()`, `send()`, `createCheckout()`. The Stripe webhook check is a separate class (`StripeWebhookParser`), not part of the checkout port |
+| **D**ependency Inversion  | The use cases depend on ports and `Psr\Clock\ClockInterface`, not on Doctrine, Messenger, Mailer or Stripe classes |
 
 ### Design patterns
 
@@ -564,7 +568,7 @@ or Stripe.
 |-------------------------|---------------------------------------------------|------------------------------------------------------------|
 | Ports and Adapters      | See the table above                               | Use cases independent of frameworks; easy to test and replace |
 | Repository              | `ProductRepository`, `OrderRepository`, `CustomerRepository` | Storage logic separated from domain and use case |
-| Command + Handler       | `PlaceOrder`, `PlaceOrderHandler`                 | Use case independent of HTTP; reusable from CLI or Messenger |
+| Command + Handler       | `PlaceOrder` + `PlaceOrderHandler`; `StartPaymentHandler`, `ConfirmPaymentHandler`, `ExpireOrderHandler` | Use cases independent of HTTP; reusable from a controller, the scheduler or Messenger |
 | Unit of Work            | `TransactionManagerInterface`                     | One transaction per use case, rolled back as a whole       |
 | Publish/Subscribe       | `IntegrationEvent`, `OrderPlaced`, `OrderPaid`, `InvoiceGenerated` over the `webshop.events` topic exchange | Services react to events without knowing each other |
 | Adapter                 | `PlaceOrderProcessor`, `StartPaymentProcessor`, `MessengerEventPublisher`, `TwigInvoiceMailer`, `StripeCheckoutGateway` | Connects a framework or provider to a use case |
@@ -594,6 +598,11 @@ Two customers ordering the last item at the same time must not both succeed. Tha
 - On an exception, `DoctrineTransactionManager` (`EntityManager::wrapInTransaction()`) rolls back
   and closes the EntityManager. Stock already deducted in memory can therefore never be flushed
   afterwards.
+- The same product locks serialize two identical requests with one `Idempotency-Key`: the second
+  one waits, then finds the first one's order. A unique index on (customer, key) catches the rest.
+- Paying and expiring lock the **order row** (`OrderRepository::findForUpdate()`), so a payment and
+  the expiry task can never both change one order. Expiry also locks the products before it puts
+  their stock back.
 
 ---
 
@@ -713,7 +722,8 @@ them), has no VAT breakdown and only uses Latin-1 characters (anything else beco
 ### Invoice email (Messenger worker)
 
 The API mails every invoice to the customer. A Messenger worker consumes the `invoice_generated`
-queue (transport `invoices` in `config/packages/messenger.yaml`):
+queue (transport `invoices` in `config/packages/messenger.yaml`); the same worker also runs the
+scheduled tasks (transport `scheduler_default`, see `src/Schedule.php`):
 
 1. `InvoiceEventSerializer` turns the JSON of the Python service into an `InvoiceGenerated` message
    (Symfony's serializer maps the `type: invoice.generated` header to the class).
@@ -732,8 +742,8 @@ Running the worker:
 | Where      | How                                                                              |
 |------------|----------------------------------------------------------------------------------|
 | DDEV       | A daemon in the web container (`web_extra_daemons` in `.ddev/config.yaml`); emails go to Mailpit (`ddev mailpit`) |
-| Production | The `worker` service in `compose.prod.yaml`: the app image running `bin/console messenger:consume invoices` |
-| By hand    | `ddev exec bin/console messenger:consume invoices -vv`                            |
+| Production | The `worker` service in `compose.prod.yaml`: the app image running `bin/console messenger:consume invoices scheduler_default` |
+| By hand    | `ddev exec bin/console messenger:consume invoices scheduler_default -vv`          |
 
 After changing PHP code, restart the worker (`ddev restart`, or `bin/console messenger:stop-workers`):
 it keeps the old code in memory.
@@ -772,11 +782,13 @@ Errors are returned as [RFC 7807 Problem Details](https://www.rfc-editor.org/rfc
 
 | Status | When                                                                     |
 |--------|--------------------------------------------------------------------------|
-| 400    | Invalid JSON or an unknown IRI                                           |
+| 400    | Invalid JSON or an unknown IRI; a Stripe webhook call without a valid signature |
 | 401    | Missing or invalid token                                                 |
 | 403    | Authenticated but not allowed (e.g. someone else's order, not an admin)  |
 | 404    | Resource does not exist                                                  |
-| 422    | Validation error (`violations`) or broken business rule (`detail`)       |
+| 409    | Conflict: a category that still has products; two different carts raced with one `Idempotency-Key` |
+| 422    | Validation error (`violations`, also for an invalid `Idempotency-Key`) or broken business rule (`detail`) |
+| 503    | Stripe can't be reached when starting a payment (`Retry-After: 30`)      |
 
 Example of a broken business rule:
 
@@ -818,8 +830,14 @@ Example of a broken business rule:
   (`PasswordUpgraderInterface`). On registration the password is checked against known data
   breaches (`NotCompromisedPassword`). The plain-text password is never stored or returned.
 - **Identifiers:** UUID v7, so they can't be guessed or enumerated.
+- **Payments:** the amount always comes from the order in the database, never from the client. The
+  Stripe webhook only accepts calls signed with `STRIPE_WEBHOOK_SECRET` (and at most 5 minutes
+  old, against replays); only the customer who placed an order can start its payment.
+- **Idempotency keys** are scoped per customer, so one customer's key can never return another
+  customer's order.
 - **Secrets:** the OAuth2 signing keys (`config/jwt/*.pem`) and `.env.*.local` are git-ignored;
-  client secrets are stored hashed.
+  client secrets are stored hashed. Stripe keys live only in `.env.*.local` or the platform's
+  environment variables; the frontend never needs one.
 
 ---
 
@@ -839,19 +857,23 @@ ddev composer fixtures  # reset the dev database and load the test data
 ### Continuous integration
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on **every push to every branch** and on every
-pull request. Three jobs run in parallel and must all pass:
+pull request. Four jobs run in parallel and must all pass:
 
 | Job                                  | Runs                                           | Where errors show up                         |
 |--------------------------------------|------------------------------------------------|----------------------------------------------|
 | **Code style (PHP-CS-Fixer)**        | `php-cs-fixer fix --dry-run`                   | Annotations on the lines + a diff in the log |
 | **Static analysis (PHPStan level 5)**| `phpstan analyse`                              | Annotations on the lines + a table in the log|
 | **Tests (PHPUnit)**                  | Full suite against PostgreSQL 17               | Annotations on the failing assertion + a list in the job summary |
+| **Invoice service (Ruff, pytest)**   | `ruff check`, `ruff format --check`, `pytest` in `services/invoice` | Annotations on the lines + the pytest output |
+
+On a push to `develop`, **Deploy to staging** runs only after all four passed (see [Staging](#staging)).
 
 Annotations appear in the **Files changed** tab of a pull request and in the **Summary** of the
 workflow run, so you rarely need to dig through the logs. Every failure also writes the command
 to reproduce it locally into the job summary.
 
-The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
+The CI mirrors the local commands: if `ddev composer qa` and the invoice service's
+`ruff`/`pytest` pass, CI passes.
 
 ### Tests
 
@@ -861,7 +883,6 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | `tests/Unit/Entity/OrderTest`  | Unit                    | Business rules of `Order::place()`, price snapshots, paying, the payment window, expiry |
 | `tests/Unit/Ordering/PlaceOrderHandlerTest` | Unit       | `OrderPlaced` published only after the commit; a rejected order is never published |
 | `tests/Unit/Messenger/MessengerEventPublisherTest` | Unit | Routing key per event; a broker failure is logged, not thrown |
-| `tests/Api/PaymentTest`        | Functional (HTTP)       | `paymentUrl`/`payableUntil` per state, starting a Stripe payment (owner, window, paid), the signed webhook (paid, repeated, bad signature, unpaid, after expiry) |
 | `tests/Integration/ExpireUnpaidOrdersTest` | Integration (kernel) | Overdue unpaid orders expire and release stock, once; recent and paid orders stay |
 | `tests/Integration/InvoiceEmailTest` | Integration (kernel) | Invoice from the Python service → email with PDF to the customer; unknown customer isn't retried; retry round trip |
 | `tests/Api/CustomerAuthTest`   | Functional (HTTP)       | Registration, logging in, access to profiles               |
@@ -870,6 +891,8 @@ The CI mirrors the local commands: if `ddev composer qa` passes, CI passes.
 | `tests/Api/CategoryTest`       | Functional (HTTP)       | Public list, slugs, uniqueness, admin-only, delete protection |
 | `tests/Api/HttpCacheTest`      | Functional (HTTP)       | Cache headers, cache tags, invalidation on changes and orders |
 | `tests/Api/PlaceOrderTest`     | Functional (HTTP)       | Ordering, stock, rollback, validation, authorization, the id in body and `Location`, `Idempotency-Key` (repeat, other lines, per customer, invalid) |
+| `tests/Api/PaymentTest`        | Functional (HTTP)       | `paymentUrl`/`payableUntil` per state, starting a Stripe payment (owner, window, paid), the signed webhook (paid, repeated, bad signature, unpaid, after expiry) |
+| `services/invoice/tests/`      | Python (pytest)         | Parsing `OrderPaid`, the PDF's content, the `invoice.generated` payload, publish-then-acknowledge, malformed messages |
 
 The functional tests run against a real PostgreSQL test database (`db_test`) and truncate the
 tables before every test. They create their data with the same Foundry factories as the dev
@@ -1013,7 +1036,7 @@ without the web server; it stops after an hour (or 128 MB) and Docker starts a f
 
 Data lives in three named volumes: `database_data` (PostgreSQL), `jwt_keys` and `rabbitmq_data`
 (events not consumed yet). **Back up `database_data`** (e.g. a daily `pg_dump`); it also holds the
-OAuth2 clients and refresh tokens. The signing keys are regenerated if lost (users then log in
+OAuth2 clients, refresh tokens and the Stripe payment references. The signing keys are regenerated if lost (users then log in
 again).
 
 Run a console command in production:
@@ -1066,7 +1089,7 @@ Symfony's standard layout: one directory per kind of class.
 │   └── security/            The login page
 ├── tests/
 │   ├── Api/                 Functional HTTP tests
-│   ├── Integration/         Kernel tests without HTTP (the invoice email)
+│   ├── Integration/         Kernel tests without HTTP (the invoice email, expiring unpaid orders)
 │   ├── Support/             Fixture helpers and test doubles (RecordingPurger, RecordingEventPublisher, FakeCheckoutGateway)
 │   └── Unit/                Unit tests of entities, use cases and adapters
 ├── Dockerfile               Production image (FrankenPHP, worker mode)
@@ -1116,10 +1139,14 @@ Symfony's standard layout: one directory per kind of class.
   which this project doesn't allow (`allow-contrib: false`). Enabling it would make the test
   isolation transactional and faster.
 - **Catalog:** inactive products still show up in the public list, although they can't be ordered.
-- **Events at most once:** `OrderPlaced` and `OrderPaid` are published directly after the commit. When RabbitMQ is
-  down the event is lost (and logged); a transactional outbox would make it reliable.
+- **Events at most once:** `OrderPlaced` and `OrderPaid` are published directly after the commit.
+  When RabbitMQ is down the event is lost (and logged); a transactional outbox would make it
+  reliable.
 - **Invoice emails:** a crash right after sending can send an email twice, and after the last retry
   a failed email is dropped (logged) instead of kept in a failure transport.
+- **RabbitMQ timeouts:** the AMQP connect/read/write timeouts are unset (`0`), so a RabbitMQ host
+  that doesn't answer at all can hold up `POST /api/orders` and the webhook. A short
+  `connect_timeout`/`read_timeout` on the transport in `messenger.yaml` would bound that.
 - **Concurrency test:** the locking is designed for concurrent orders, but there is no test yet
   that actually fires parallel requests.
 
