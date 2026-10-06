@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Production image: FrankenPHP (Caddy + PHP) serving the Symfony app in worker mode.
-# In compose.prod.yaml it runs behind Varnish (docker/varnish) on plain HTTP port 80.
+# In docker-compose.yaml it runs behind Varnish (docker/varnish) on plain HTTP port 80.
 # Local development uses DDEV; this image is for servers. See README > Deployment.
 
 FROM dunglas/frankenphp:1-php8.4 AS base

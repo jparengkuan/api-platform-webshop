@@ -759,7 +759,7 @@ Running the worker:
 | Where      | How                                                                              |
 |------------|----------------------------------------------------------------------------------|
 | DDEV       | A daemon in the web container (`web_extra_daemons` in `.ddev/config.yaml`); emails go to Mailpit (`ddev mailpit`) |
-| Production | The `worker` service in `compose.prod.yaml`: the app image running `bin/console messenger:consume outbox invoices scheduler_default` |
+| Production | The `worker` service in `docker-compose.yaml`: the app image running `bin/console messenger:consume outbox invoices scheduler_default` |
 | By hand    | `ddev exec bin/console messenger:consume outbox invoices scheduler_default -vv`   |
 
 After changing PHP code, restart the worker (`ddev restart`, or `bin/console messenger:stop-workers`):
@@ -934,7 +934,7 @@ Foundry's PHPUnit extension is registered in `phpunit.dist.xml`.
 
 ## Deployment (Docker)
 
-DDEV is for development only. For servers there is a production stack in `compose.prod.yaml`:
+DDEV is for development only. For servers there is a production stack in `docker-compose.yaml`:
 
 ```
 reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
@@ -966,12 +966,12 @@ roll back to one build. The packages are private, so log the server in once with
 
 ```bash
 cp .env.prod.local.dist .env.prod.local     # fill in real values; the copy is git-ignored
-docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --wait
+docker compose -f docker-compose.yaml --env-file .env.prod.local up -d --wait
 curl http://127.0.0.1:8080/api/products     # through Varnish, from the server itself
 ```
 
 To build the images on the machine itself instead, add `compose.build.yaml`:
-`docker compose -f compose.prod.yaml -f compose.build.yaml --env-file .env.prod.local up -d --build --wait`.
+`docker compose -f docker-compose.yaml -f compose.build.yaml --env-file .env.prod.local up -d --build --wait`.
 
 | Variable                   | Meaning                                                               |
 |----------------------------|-----------------------------------------------------------------------|
@@ -1075,7 +1075,7 @@ again).
 Run a console command in production:
 
 ```bash
-docker compose -f compose.prod.yaml --env-file .env.prod.local exec php bin/console about
+docker compose -f docker-compose.yaml --env-file .env.prod.local exec php bin/console about
 ```
 
 ---
@@ -1126,7 +1126,7 @@ Symfony's standard layout: one directory per kind of class.
 │   ├── Support/             Fixture helpers and test doubles (RecordingPurger, RecordingEventPublisher, FakeCheckoutGateway)
 │   └── Unit/                Unit tests of entities, use cases and adapters
 ├── Dockerfile               Production image (FrankenPHP, worker mode)
-├── compose.prod.yaml        Production stack: Varnish, app, worker, PostgreSQL, RabbitMQ, invoice service
+├── docker-compose.yaml      Deployment stack (test and production): Varnish, app, worker, PostgreSQL, RabbitMQ, invoice service
 ├── .php-cs-fixer.dist.php   Code style (@Symfony)
 ├── phpstan.dist.neon        Static analysis (level 5)
 └── phpunit.dist.xml         PHPUnit configuration

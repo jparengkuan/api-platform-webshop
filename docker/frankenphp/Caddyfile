@@ -9,7 +9,7 @@
 	}
 }
 
-# Default ":80": plain HTTP behind Varnish (compose.prod.yaml), with TLS terminated further out.
+# Default ":80": plain HTTP behind Varnish (docker-compose.yaml), with TLS terminated further out.
 # Set SERVER_NAME to a domain only when running this image on its own, directly on the internet;
 # Caddy then fetches a Let's Encrypt certificate automatically.
 {$SERVER_NAME::80} {

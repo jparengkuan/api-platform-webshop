@@ -29,6 +29,7 @@ services/
 phpstan.dist.neon
 phpunit.dist.xml
 compose*.yaml
+docker-compose.yaml
 Dockerfile
 .dockerignore
 *.md

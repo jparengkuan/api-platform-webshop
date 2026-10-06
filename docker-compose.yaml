@@ -1,4 +1,4 @@
-# Production stack:  reverse proxy (TLS)  →  varnish :80  →  php :80  →  database
+# Deployment stack (test and production):  reverse proxy (TLS)  →  varnish :80  →  php :80  →  database
 #                                                                 └──→  rabbitmq (events)  ⇄  invoice
 #                                                  worker (mails invoices)  ◀──┘
 #
@@ -11,9 +11,10 @@
 # "<branch>-<commit>" to pin one build). To build them on this machine instead, add compose.build.yaml.
 #
 #   cp .env.prod.local.dist .env.prod.local   # then fill in real secrets
-#   docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --wait
+#   docker compose -f docker-compose.yaml --env-file .env.prod.local up -d --wait
 #
-# Standalone on purpose: compose.yaml/compose.override.yaml belong to the Doctrine recipe.
+# Standalone on purpose: compose.yaml/compose.override.yaml belong to the Doctrine recipe, and
+# `docker compose` without -f keeps using those; always pass -f docker-compose.yaml for this stack.
 
 # Configuration shared by the app (php) and the Messenger worker, which run the same image.
 x-app-environment: &app-environment

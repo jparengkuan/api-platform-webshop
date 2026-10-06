@@ -1,7 +1,7 @@
 # Builds the app, varnish and invoice images on this machine instead of pulling them from the
-# GitHub Container Registry. Use it together with compose.prod.yaml:
+# GitHub Container Registry. Use it together with docker-compose.yaml:
 #
-#   docker compose -f compose.prod.yaml -f compose.build.yaml --env-file .env.prod.local up -d --build --wait
+#   docker compose -f docker-compose.yaml -f compose.build.yaml --env-file .env.prod.local up -d --build --wait
 #
 # The CI builds the same images (.github/workflows/ci.yml, job "Build images").
 
