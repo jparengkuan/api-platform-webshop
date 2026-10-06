@@ -885,7 +885,7 @@ pull request. Four jobs run in parallel and must all pass:
 | **Tests (PHPUnit)**                  | Full suite against PostgreSQL 17               | Annotations on the failing assertion + a list in the job summary |
 | **Invoice service (Ruff, pytest)**   | `ruff check`, `ruff format --check`, `pytest` in `services/invoice` | Annotations on the lines + the pytest output |
 
-On a push to `develop`, **Deploy to staging** runs only after all four passed (see [Staging](#staging)).
+On a push to `develop`, **Deploy to test** runs only after all four passed (see [Staging](#staging)).
 
 Annotations appear in the **Files changed** tab of a pull request and in the **Summary** of the
 workflow run, so you rarely need to dig through the logs. Every failure also writes the command
@@ -957,11 +957,21 @@ reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
 
 ### Run it
 
+The CI builds the app, varnish and invoice images and pushes them to the GitHub Container
+Registry (`ghcr.io/jparengkuan/api-platform-webshop`, `…-varnish`, `…-invoice`); the server only
+pulls them. A push to `develop` produces the tag `develop` (with the dev dependencies for the demo
+data), a push to `master` the tag `master`; each build is also tagged `<branch>-<commit>`, to pin or
+roll back to one build. The packages are private, so log the server in once with a token that has
+`read:packages`: `docker login ghcr.io -u <github user>`.
+
 ```bash
 cp .env.prod.local.dist .env.prod.local     # fill in real values; the copy is git-ignored
-docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build --wait
+docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --wait
 curl http://127.0.0.1:8080/api/products     # through Varnish, from the server itself
 ```
+
+To build the images on the machine itself instead, add `compose.build.yaml`:
+`docker compose -f compose.prod.yaml -f compose.build.yaml --env-file .env.prod.local up -d --build --wait`.
 
 | Variable                   | Meaning                                                               |
 |----------------------------|-----------------------------------------------------------------------|
@@ -978,7 +988,8 @@ curl http://127.0.0.1:8080/api/products     # through Varnish, from the server i
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
 | `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |
-| `INSTALL_DEV_DEPENDENCIES` | Build argument; `1` for staging (adds Foundry for the demo data), `0` (default) for production |
+| `IMAGE_TAG`                | Which images to pull: `develop` for staging, `master` for production, or `<branch>-<commit>` to pin one build |
+| `INSTALL_DEV_DEPENDENCIES` | Only with `compose.build.yaml`: `1` adds Foundry for the demo data (staging), `0` (default) for production |
 | `RESET_DEMO_DATA`          | Staging only: `1` replaces all data with the demo fixtures on every start. Refuses to run on a production image. |
 
 ### HTTP caching (Varnish)
@@ -1017,11 +1028,12 @@ invalidates.
 ### Staging
 
 Every push to `develop` is deployed to a staging environment, **after** code style, PHPStan and the
-tests pass: the `deploy-staging` job in `.github/workflows/ci.yml` calls the deploy webhook of the
-hosting platform (Coolify). It needs two repository secrets, `COOLIFY_STAGING_WEBHOOK` and
+tests pass: the `images` job in `.github/workflows/ci.yml` pushes the `develop` images to the
+registry, then the `deploy-test` job calls the deploy webhook of the hosting platform (Coolify),
+which pulls them. It needs two repository secrets, `COOLIFY_TEST_WEBHOOK` and
 `COOLIFY_TOKEN`; without them the job skips itself with a notice.
 
-Staging runs the same stack, built with `INSTALL_DEV_DEPENDENCIES=1` and started with
+Staging runs the same stack with `IMAGE_TAG=develop` (built with the dev dependencies) and
 `RESET_DEMO_DATA=1`, so every deployment starts with the same fresh demo data (`admin@example.com`
 and `klant@example.com`, password `password`). Never reuse staging secrets or its database for
 production. Staging uses Stripe's **test** keys with its own test-mode webhook endpoint, so testers

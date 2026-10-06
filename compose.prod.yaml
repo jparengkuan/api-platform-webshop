@@ -6,8 +6,12 @@
 # forwards the domain to the "varnish" service on port 80. Nothing is exposed publicly by
 # this file; for testing on the machine itself Varnish listens on 127.0.0.1:${HTTP_PORT}.
 #
+# The app, varnish and invoice images are built by the CI and pulled from the GitHub Container
+# Registry: IMAGE_TAG "develop" for the test environment, "master" for production (or
+# "<branch>-<commit>" to pin one build). To build them on this machine instead, add compose.build.yaml.
+#
 #   cp .env.prod.local.dist .env.prod.local   # then fill in real secrets
-#   docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --build
+#   docker compose -f compose.prod.yaml --env-file .env.prod.local up -d --wait
 #
 # Standalone on purpose: compose.yaml/compose.override.yaml belong to the Doctrine recipe.
 
@@ -34,9 +38,9 @@ x-app-environment: &app-environment
 
 services:
   varnish:
-    build:
-      context: docker/varnish
-    image: ${IMAGE_NAME:-api-platform-webshop}-varnish:${IMAGE_TAG:-latest}
+    image: ${IMAGE_NAME:-ghcr.io/jparengkuan/api-platform-webshop}-varnish:${IMAGE_TAG:?Set IMAGE_TAG}
+    # The tag moves with every build of the branch: fetch the newest one on every deployment.
+    pull_policy: always
     restart: unless-stopped
     environment:
       VARNISH_SIZE: ${VARNISH_SIZE:-256M}
@@ -52,13 +56,9 @@ services:
         condition: service_healthy
 
   php:
-    build: &app-build
-      context: .
-      target: prod
-      args:
-        # 1 for a staging/test environment with demo data (together with RESET_DEMO_DATA=1).
-        INSTALL_DEV_DEPENDENCIES: ${INSTALL_DEV_DEPENDENCIES:-0}
-    image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
+    # The "develop" image contains the dev dependencies for the demo data; "master" doesn't.
+    image: ${IMAGE_NAME:-ghcr.io/jparengkuan/api-platform-webshop}:${IMAGE_TAG:?Set IMAGE_TAG}
+    pull_policy: always
     restart: unless-stopped
     environment:
       <<: *app-environment
@@ -78,9 +78,8 @@ services:
   # and running the scheduled tasks, such as expiring unpaid orders. It stops after an hour (or
   # 128 MB) and Docker starts a fresh one.
   worker:
-    # Same build as php (fully cached), so the image exists even when this service starts first.
-    build: *app-build
-    image: ${IMAGE_NAME:-api-platform-webshop}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_NAME:-ghcr.io/jparengkuan/api-platform-webshop}:${IMAGE_TAG:?Set IMAGE_TAG}
+    pull_policy: always
     restart: unless-stopped
     command: ['bin/console', 'messenger:consume', 'outbox', 'invoices', 'scheduler_default', '--time-limit=3600', '--memory-limit=128M', '-vv']
     environment: *app-environment
@@ -113,9 +112,8 @@ services:
 
   # Python service: turns every OrderPlaced event into an invoice PDF, published as invoice.generated.
   invoice:
-    build:
-      context: services/invoice
-    image: ${IMAGE_NAME:-api-platform-webshop}-invoice:${IMAGE_TAG:-latest}
+    image: ${IMAGE_NAME:-ghcr.io/jparengkuan/api-platform-webshop}-invoice:${IMAGE_TAG:?Set IMAGE_TAG}
+    pull_policy: always
     restart: unless-stopped
     environment:
       AMQP_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}@rabbitmq:5672/%2f

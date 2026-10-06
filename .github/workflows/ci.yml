@@ -147,26 +147,107 @@ jobs:
       - name: Run the tests
         run: pytest
 
-  deploy-staging:
-    name: Deploy to staging
-    # Only after all checks passed, and only for pushes to develop (not for pull requests).
+  images:
+    name: Build images
+    # Only after all checks passed, and only for pushes to develop and master (not for pull requests).
     needs: [code-style, static-analysis, tests, invoice-service]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Every image gets two tags: the branch (what the servers pull) and branch-commit (to pin or
+      # roll back to one build). develop is the test environment, so its app image also contains
+      # the dev dependencies for the demo data.
+      - name: Determine names and tags
+        id: meta
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          branch="$GITHUB_REF_NAME"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$branch-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          if [ "$branch" = develop ]; then echo 'dev=1' >> "$GITHUB_OUTPUT"; else echo 'dev=0' >> "$GITHUB_OUTPUT"; fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: prod
+          build-args: INSTALL_DEV_DEPENDENCIES=${{ steps.meta.outputs.dev }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.branch }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.commit }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=app-${{ steps.meta.outputs.branch }}
+          cache-to: type=gha,mode=max,scope=app-${{ steps.meta.outputs.branch }}
+
+      - name: Build and push the varnish image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/varnish
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}-varnish:${{ steps.meta.outputs.branch }}
+            ${{ steps.meta.outputs.image }}-varnish:${{ steps.meta.outputs.commit }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=varnish
+          cache-to: type=gha,mode=max,scope=varnish
+
+      - name: Build and push the invoice image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/invoice
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}-invoice:${{ steps.meta.outputs.branch }}
+            ${{ steps.meta.outputs.image }}-invoice:${{ steps.meta.outputs.commit }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=invoice
+          cache-to: type=gha,mode=max,scope=invoice
+
+      - name: Summary
+        run: |
+          {
+            echo '### 📦 Images pushed'
+            echo "Tags \`${{ steps.meta.outputs.branch }}\` and \`${{ steps.meta.outputs.commit }}\` of:"
+            echo "- \`${{ steps.meta.outputs.image }}\`"
+            echo "- \`${{ steps.meta.outputs.image }}-varnish\`"
+            echo "- \`${{ steps.meta.outputs.image }}-invoice\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-test:
+    name: Deploy to test
+    # Only after the images of this commit are in the registry, and only for pushes to develop.
+    needs: [images]
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     # Never cancel a deployment halfway because a newer commit arrived.
     concurrency:
-      group: deploy-staging
+      group: deploy-test
       cancel-in-progress: false
     steps:
       - name: Trigger the Coolify deployment
         env:
-          WEBHOOK: ${{ secrets.COOLIFY_STAGING_WEBHOOK }}
+          WEBHOOK: ${{ secrets.COOLIFY_TEST_WEBHOOK }}
           TOKEN: ${{ secrets.COOLIFY_TOKEN }}
         run: |
           if [ -z "$WEBHOOK" ] || [ -z "$TOKEN" ]; then
-            echo '::notice title=Staging deploy skipped::Set the COOLIFY_STAGING_WEBHOOK and COOLIFY_TOKEN repository secrets to enable it (see README > Deployment > Staging).'
+            echo '::notice title=Test deploy skipped::Set the COOLIFY_TEST_WEBHOOK and COOLIFY_TOKEN repository secrets to enable it (see README > Deployment > Staging).'
             exit 0
           fi
           curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$WEBHOOK"
-          echo '### 🚀 Staging deployment triggered' >> "$GITHUB_STEP_SUMMARY"
+          echo '### 🚀 Test deployment triggered' >> "$GITHUB_STEP_SUMMARY"
           echo 'Coolify is building the new version; follow it under Deployments in Coolify.' >> "$GITHUB_STEP_SUMMARY"

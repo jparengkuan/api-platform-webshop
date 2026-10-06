@@ -1,0 +1,31 @@
+# Builds the app, varnish and invoice images on this machine instead of pulling them from the
+# GitHub Container Registry. Use it together with compose.prod.yaml:
+#
+#   docker compose -f compose.prod.yaml -f compose.build.yaml --env-file .env.prod.local up -d --build --wait
+#
+# The CI builds the same images (.github/workflows/ci.yml, job "Build images").
+
+services:
+  varnish:
+    build:
+      context: docker/varnish
+    pull_policy: build
+
+  php:
+    build: &app-build
+      context: .
+      target: prod
+      args:
+        # 1 for a test environment with demo data (together with RESET_DEMO_DATA=1).
+        INSTALL_DEV_DEPENDENCIES: ${INSTALL_DEV_DEPENDENCIES:-0}
+    pull_policy: build
+
+  worker:
+    # Same build as php (fully cached), so the image exists even when this service starts first.
+    build: *app-build
+    pull_policy: build
+
+  invoice:
+    build:
+      context: services/invoice
+    pull_policy: build
