@@ -1,6 +1,7 @@
 name: CI
 
-# Runs on every push to every branch (master, develop, feature branches) and on every pull request.
+# The checks run on every push to every branch and on every pull request. Only develop is built and
+# deployed (the test environment); there is no production deployment.
 on:
   push:
     branches: ['**']
@@ -149,9 +150,9 @@ jobs:
 
   images:
     name: Build images
-    # Only after all checks passed, and only for pushes to develop and master (not for pull requests).
+    # Only after all checks passed, and only for pushes to develop (not for pull requests).
     needs: [code-style, static-analysis, tests, invoice-service]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -159,18 +160,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Every image gets two tags: the branch (what the servers pull) and branch-commit (to pin or
-      # roll back to one build). develop is the test environment, so its app image also contains
-      # the dev dependencies for the demo data.
-      - name: Determine names and tags
+      # Every image gets two tags: develop (what the test server pulls) and develop-<commit> (to pin or
+      # roll back to one build). The app image contains the dev dependencies for the demo data.
+      - name: Determine the image name and tags
         id: meta
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          branch="$GITHUB_REF_NAME"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          echo "commit=$branch-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          if [ "$branch" = develop ]; then echo 'dev=1' >> "$GITHUB_OUTPUT"; else echo 'dev=0' >> "$GITHUB_OUTPUT"; fi
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "commit=develop-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -185,14 +181,14 @@ jobs:
         with:
           context: .
           target: prod
-          build-args: INSTALL_DEV_DEPENDENCIES=${{ steps.meta.outputs.dev }}
+          build-args: INSTALL_DEV_DEPENDENCIES=1
           push: true
           tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.branch }}
+            ${{ steps.meta.outputs.image }}:develop
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.commit }}
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=app-${{ steps.meta.outputs.branch }}
-          cache-to: type=gha,mode=max,scope=app-${{ steps.meta.outputs.branch }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
 
       - name: Build and push the varnish image
         uses: docker/build-push-action@v6
@@ -200,7 +196,7 @@ jobs:
           context: docker/varnish
           push: true
           tags: |
-            ${{ steps.meta.outputs.image }}-varnish:${{ steps.meta.outputs.branch }}
+            ${{ steps.meta.outputs.image }}-varnish:develop
             ${{ steps.meta.outputs.image }}-varnish:${{ steps.meta.outputs.commit }}
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=varnish
@@ -212,7 +208,7 @@ jobs:
           context: services/invoice
           push: true
           tags: |
-            ${{ steps.meta.outputs.image }}-invoice:${{ steps.meta.outputs.branch }}
+            ${{ steps.meta.outputs.image }}-invoice:develop
             ${{ steps.meta.outputs.image }}-invoice:${{ steps.meta.outputs.commit }}
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=invoice
@@ -222,7 +218,7 @@ jobs:
         run: |
           {
             echo '### 📦 Images pushed'
-            echo "Tags \`${{ steps.meta.outputs.branch }}\` and \`${{ steps.meta.outputs.commit }}\` of:"
+            echo "Tags \`develop\` and \`${{ steps.meta.outputs.commit }}\` of:"
             echo "- \`${{ steps.meta.outputs.image }}\`"
             echo "- \`${{ steps.meta.outputs.image }}-varnish\`"
             echo "- \`${{ steps.meta.outputs.image }}-invoice\`"
@@ -250,4 +246,4 @@ jobs:
           fi
           curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$WEBHOOK"
           echo '### 🚀 Test deployment triggered' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Coolify is building the new version; follow it under Deployments in Coolify.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Coolify pulls the new images; follow it under Deployments in Coolify.' >> "$GITHUB_STEP_SUMMARY"

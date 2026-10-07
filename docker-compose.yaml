@@ -7,8 +7,7 @@
 # this file; for testing on the machine itself Varnish listens on 127.0.0.1:${HTTP_PORT}.
 #
 # The app, varnish and invoice images are built by the CI and pulled from the GitHub Container
-# Registry: IMAGE_TAG "develop" for the test environment, "master" for production (or
-# "<branch>-<commit>" to pin one build). To build them on this machine instead, add compose.build.yaml.
+# Registry: IMAGE_TAG "develop" (or "develop-<commit>" to pin one build). To build them on this machine instead, add compose.build.yaml.
 #
 #   cp .env.prod.local.dist .env.prod.local   # then fill in real secrets
 #   docker compose -f docker-compose.yaml --env-file .env.prod.local up -d --wait
@@ -57,7 +56,7 @@ services:
         condition: service_healthy
 
   php:
-    # The "develop" image contains the dev dependencies for the demo data; "master" doesn't.
+    # The image contains the dev dependencies for the demo data (RESET_DEMO_DATA=1).
     image: ${IMAGE_NAME:-ghcr.io/jparengkuan/api-platform-webshop}:${IMAGE_TAG:?Set IMAGE_TAG}
     pull_policy: always
     restart: unless-stopped

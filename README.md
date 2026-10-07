@@ -1,6 +1,6 @@
 # Webshop API
 
-[![CI](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml)
+[![CI](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/jparengkuan/api-platform-webshop/actions/workflows/ci.yml)
 
 A REST/JSON-LD API for a simple webshop, built with **Symfony 8.1** and **API Platform 5**.
 Customers can register, log in through an OAuth2 client application, browse the catalog and place
@@ -960,8 +960,8 @@ reverse proxy (TLS)  →  Varnish :80  →  FrankenPHP :80  →  PostgreSQL 17
 The CI builds the app, varnish and invoice images and pushes them to the GitHub Container
 Registry (`ghcr.io/jparengkuan/api-platform-webshop`, `…-varnish`, `…-invoice`); the server only
 pulls them. A push to `develop` produces the tag `develop` (with the dev dependencies for the demo
-data), a push to `master` the tag `master`; each build is also tagged `<branch>-<commit>`, to pin or
-roll back to one build. The packages are private, so log the server in once with a token that has
+data); each build is also tagged `develop-<commit>`, to pin or roll back to one build. There is no
+production deployment. The packages are private, so log the server in once with a token that has
 `read:packages`: `docker login ghcr.io -u <github user>`.
 
 ```bash
@@ -988,7 +988,7 @@ To build the images on the machine itself instead, add `compose.build.yaml`:
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
 | `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |
-| `IMAGE_TAG`                | Which images to pull: `develop` for staging, `master` for production, or `<branch>-<commit>` to pin one build |
+| `IMAGE_TAG`                | Which images to pull: `develop`, or `develop-<commit>` to pin one build |
 | `INSTALL_DEV_DEPENDENCIES` | Only with `compose.build.yaml`: `1` adds Foundry for the demo data (staging), `0` (default) for production |
 | `RESET_DEMO_DATA`          | Staging only: `1` replaces all data with the demo fixtures on every start. Refuses to run on a production image. |
 
