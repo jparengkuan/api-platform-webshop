@@ -122,6 +122,19 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # Test environment only (profile "mail", enabled with COMPOSE_PROFILES=mail): catches every email
+  # the worker sends, so the invoices can be read in a web UI instead of reaching real customers.
+  # Set MAILER_DSN=smtp://mailpit:1025 and give this service a domain on port 8025 (keep MAILPIT_AUTH
+  # set: the mailbox holds customer data). Never enable it in production.
+  mailpit:
+    image: axllent/mailpit:latest
+    profiles: [mail]
+    restart: unless-stopped
+    environment:
+      # user:password for the web UI, e.g. test:<long random string>.
+      MP_UI_AUTH: ${MAILPIT_AUTH:-}
+      MP_MAX_MESSAGES: 500
+
   database:
     image: postgres:17-alpine
     restart: unless-stopped
