@@ -244,6 +244,15 @@ jobs:
             echo '::notice title=Test deploy skipped::Set the COOLIFY_TEST_WEBHOOK and COOLIFY_TOKEN repository secrets to enable it (see README > Deployment > Staging).'
             exit 0
           fi
-          curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$WEBHOOK"
+          # The part before "?" holds no secret (the deploy uuid is in the query); show it so a wrong
+          # URL is easy to spot.
+          echo "Calling ${WEBHOOK%%\?*}"
+          # Coolify's deploy endpoint only accepts POST (a GET answers 405).
+          status=$(curl --silent --show-error --request POST --output response.txt --write-out '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" "$WEBHOOK") || status=000
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "::error title=Coolify answered HTTP $status::$(head -c 300 response.txt)"
+            exit 1
+          fi
           echo '### 🚀 Test deployment triggered' >> "$GITHUB_STEP_SUMMARY"
           echo 'Coolify pulls the new images; follow it under Deployments in Coolify.' >> "$GITHUB_STEP_SUMMARY"
