@@ -126,7 +126,7 @@ Emails (the invoices) land in Mailpit: `ddev mailpit` opens it.
 | `MAILER_FROM`        | Sender address of the emails to customers                        |
 | `STRIPE_SECRET_KEY`  | Stripe secret key; `sk_test_…` locally and on staging. Empty in `.env`: set it in `.env.dev.local` |
 | `STRIPE_WEBHOOK_SECRET` | Signing secret of the webhook endpoint (`whsec_…`); tests use their own (`.env.test`) |
-| `FRONTEND_URL`       | Where Stripe sends the customer back to after paying (default `http://localhost:3000`) |
+| `FRONTEND_URL`       | Where Stripe sends the customer back to after paying, and the demo OAuth2 client's redirect (`/callback`) (default `http://localhost:3000`) |
 | `APP_SECRET`         | Symfony secret; in production via the secrets vault              |
 
 ### Test data
@@ -984,7 +984,7 @@ To build the images on the machine itself instead, add `compose.build.yaml`:
 | `MAILER_FROM`              | Sender address of the invoice emails                                  |
 | `STRIPE_SECRET_KEY`        | Stripe secret key: `sk_test_…` on staging, `sk_live_…` in production   |
 | `STRIPE_WEBHOOK_SECRET`    | Signing secret of the webhook endpoint `https://<api domain>/stripe/webhook` in the Stripe dashboard |
-| `FRONTEND_URL`             | Where Stripe sends the customer back to after paying                  |
+| `FRONTEND_URL`             | Where Stripe sends the customer back to after paying; also the demo OAuth2 client's `/callback` |
 | `CORS_ALLOW_ORIGIN`        | Regex of your frontend's origin(s)                                    |
 | `VARNISH_SIZE`             | Memory for Varnish's cache (default `256M`)                            |
 | `HTTP_PORT`                | Port on `127.0.0.1` of the server for local testing (default `8080`); give every stack on the same server its own port |

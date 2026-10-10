@@ -9,6 +9,7 @@ use App\Factory\CustomerFactory;
 use App\Factory\OAuthClientFactory;
 use App\Factory\OrderFactory;
 use App\Factory\ProductFactory;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Zenstruck\Foundry\Attribute\AsFixture;
 use Zenstruck\Foundry\Story;
 
@@ -31,6 +32,15 @@ final class AppStory extends Story
     private const int ORDERS = 500;
 
     /**
+     * @param string $frontendUrl the frontend of this environment, which also receives the OAuth2 redirect
+     */
+    public function __construct(
+        #[Autowire('%env(FRONTEND_URL)%')]
+        private readonly string $frontendUrl,
+    ) {
+    }
+
+    /**
      * Builds the data set.
      */
     public function build(): void
@@ -39,6 +49,8 @@ final class AppStory extends Story
         OAuthClientFactory::createOne([
             'name' => 'Webshop demo',
             'identifier' => OAuthClientFactory::DEMO_IDENTIFIER,
+            // Redirects to the callback of this environment's frontend (FRONTEND_URL).
+            'redirectUris' => [rtrim($this->frontendUrl, '/').'/callback'],
         ]);
 
         $this->addState('admin', CustomerFactory::new()->admin()->create([
